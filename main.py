@@ -34,14 +34,14 @@ from utils import (AverageMeter, accuracy, create_loss_fn,
 logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='MPL100-lr0.0001base',type=str,help='experiment name')
+parser.add_argument('--name', default='MPL32base+drop0.7',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
 parser.add_argument('--save-path', default='./checkpoint', type=str, help='save path')
 parser.add_argument('--dataset', default='AGNews', type=str,
                     choices=['base'], help='dataset name')
 parser.add_argument('--num-labeled', type=int, default=4000, help='number of labeled data')
 parser.add_argument("--expand-labels", action="store_true", help="expand labels to fit eval steps")
-parser.add_argument('--total-steps', default=50000, type=int, help='number of total steps to run')
+parser.add_argument('--total-steps', default=300000, type=int, help='number of total steps to run')
 parser.add_argument('--eval-step', default=100, type=int, help='number of eval steps to run')
 parser.add_argument('--start-step', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
@@ -82,7 +82,7 @@ parser.add_argument('--world-size', default= -1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument("--local_rank", type=int, default= -1,
                     help="For distributed training: local_rank")
-parser.add_argument('--max_len', default=200, type=int, help='text_len')
+parser.add_argument('--max_len', default=32, type=int, help='text_len')
 parser.add_argument('--model', default='bert',type=str,help='model name')
 parser.add_argument('--mode', default='train',type=str,help='mode name')
 
@@ -551,7 +551,7 @@ def main():
         torch.distributed.init_process_group(backend='nccl',world_size = 4,rank = args.local_rank )
         args.world_size = torch.distributed.get_world_size()
     else:
-        args.gpu = 1
+        args.gpu = 0
         args.world_size = 1
 
     args.device = torch.device('cuda', args.gpu)
