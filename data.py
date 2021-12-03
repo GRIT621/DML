@@ -290,8 +290,8 @@ def get_AGNews(args):
 
 
 
-    data = pd.read_csv('/home/lsj0920/mpl-pytorch-main/dataset/AG_NEWS/train.csv',names = ["label","title","text"])
-    dev_data = pd.read_csv('/home/lsj0920/mpl-pytorch-main/dataset/AG_NEWS/test.csv',names = ["label","title","text"])
+    data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/AG_NEWS/train.csv',names = ["label","title","text"])
+    dev_data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/AG_NEWS/test.csv',names = ["label","title","text"])
     if args.num_labeled == 100:
         data2 = data.sample(frac= 0.3, random_state=2333)
     if args.num_labeled == 1000:
@@ -331,7 +331,6 @@ def get_AGNews(args):
                                 test_label=devlabel)
 
     return train_labeled_dataset, train_unlabeled_dataset, test_dataset,dev_dataset
-
 
 def get_Yelp(args):
     pretrained_weights = 'bert-base-cased'
@@ -414,3 +413,4 @@ DATASET_GETTERS = {'base':get_base,
                    'Yelp':get_Yelp,
 
                    }
+print("AAAAA")

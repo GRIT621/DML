@@ -38,26 +38,26 @@ import warnings
 warnings.filterwarnings('ignore')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='test100',type=str,help='experiment name')
+parser.add_argument('--name', default='Yelp100',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
 parser.add_argument('--save-path', default='./checkpoint3', type=str, help='save path')
 parser.add_argument('--dataset', default='Yelp', type=str,
                     choices=['base'], help='dataset name')
-parser.add_argument('--num_labeled', type=int, default=1000, help='number of labeled data')
+parser.add_argument('--num_labeled', type=int, default=100, help='number of labeled data')
 parser.add_argument('--num_unlabeled', type=int, default=20000, help='number of unlabeled data')
 parser.add_argument("--expand-labels", action="store_true", help="expand labels to fit eval steps")
-parser.add_argument('--total-steps', default=40000, type=int, help='number of total steps to run')
+parser.add_argument('--total-steps', default=30000, type=int, help='number of total steps to run')
 parser.add_argument('--eval-step', default=100, type=int, help='number of eval steps to run')
 parser.add_argument('--start-step', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--workers', default=4, type=int, help='number of workers')
 parser.add_argument('--num_classes', default=5, type=int, help='number of classes')
 parser.add_argument('--resize', default=32, type=int, help='resize image')
-parser.add_argument('--batch-size', default=16, type=int, help='train batch size')
+parser.add_argument('--batch-size', default=32, type=int, help='train batch size')
 parser.add_argument('--teacher-dropout', default=0, type=float, help='dropout on last dense layer')
 parser.add_argument('--student-dropout', default=0, type=float, help='dropout on last dense layer')
-parser.add_argument('--teacher_lr', default=0.0005, type=float, help='train learning late')
-parser.add_argument('--student_lr', default=0.0005, type=float, help='train learning late')
+parser.add_argument('--teacher_lr', default=0.0001, type=float, help='train learning late')
+parser.add_argument('--student_lr', default=0.0001, type=float, help='train learning late')
 parser.add_argument('--momentum', default=0.9, type=float, help='SGD Momentum')
 parser.add_argument('--nesterov', action='store_true', help='use nesterov')
 parser.add_argument('--weight-decay', default=0, type=float, help='train weight decay')
@@ -87,11 +87,11 @@ parser.add_argument('--world-size', default= -1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument("--local_rank", type=int, default= -1,
                     help="For distributed training: clocal_rank")
-parser.add_argument('--max_len', default=136, type=int, help='text_len')
+parser.add_argument('--max_len', default=64, type=int, help='text_len')
 parser.add_argument('--model', default='bert',type=str,help='model name')
 parser.add_argument('--mode', default='train',type=str,help='mode name')
 parser.add_argument("--gpu_ids", type=list, default= [0], help="gpu-ids")
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 
 
 def setup_seed(seed):
