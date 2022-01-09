@@ -13,14 +13,21 @@ from transformers import AutoTokenizer, AutoModel, AutoConfig, BertTokenizer, Be
 from sklearn.model_selection import KFold, train_test_split
 import os
 # from torchtext.data.utils import get_tokenizer
-from augmentation import RandAugment
-
-logger = logging.getLogger(__name__)
-
 
 
 logger = logging.getLogger(__name__)
 
+
+
+logger = logging.getLogger(__name__)
+
+pretrained_weights = 'bert-base-cased'
+
+model_class = BertForSequenceClassification
+tokenizer_class = BertTokenizer
+
+tokenizer = tokenizer_class.from_pretrained(pretrained_weights, do_lower_case=False)
+print(tokenizer)
 def loadModelTokenizer(num_labels, language = 'english'):
     model_class = BertForSequenceClassification
     tokenizer_class = BertTokenizer
@@ -290,8 +297,20 @@ def get_AGNews(args):
 
 
 
-    data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/AG_NEWS/train.csv',names = ["label","title","text"])
-    dev_data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/AG_NEWS/test.csv',names = ["label","title","text"])
+    data = pd.read_csv('./dataset/AG_NEWS/train.csv',names = ["label","title","text"])
+    test_data = pd.read_csv('./dataset/AG_NEWS/test.csv',names = ["label","title","text"])
+    test_data['train_id'] = test_data['title'] + " " + test_data["text"]
+    test_data['train_id'] = test_data['train_id'].apply(tokenizen)
+    def modifylabel(row):
+        return row - 1
+    test_data["label"] = test_data["label"].apply(modifylabel)
+    testdata, testlabel = torch.tensor(test_data['train_id'] , dtype=torch.long), torch.tensor(test_data['label'] , dtype=torch.long)
+    test_dataset = Base_dataset(args, model=args.model, mode="test",
+                                train_data=testdata, test_data=testdata, train_label=testlabel,
+                                test_label=testlabel)
+    if args.evaluate == True:
+        return test_dataset
+
     if args.num_labeled == 100:
         data2 = data.sample(frac= 0.3, random_state=2333)
     if args.num_labeled == 1000:
@@ -300,37 +319,23 @@ def get_AGNews(args):
         data2 = data.sample(frac= 0.4, random_state=2333)
     data2['train_id'] = data2['title'] + " " + data2["text"]
     data2['train_id'] = data2['train_id'].apply(tokenizen)
-    dev_data['train_id'] = dev_data['title'] + " " + dev_data["text"]
-    dev_data['train_id'] = dev_data['train_id'].apply(tokenizen)
-
-
-
-    def modifylabel(row):
-        return row - 1
-
     data2["label"] = data2["label"].apply(modifylabel)
-    dev_data["label"] = dev_data["label"].apply(modifylabel)
 
-
-    train_data, test_data, train_label, test_label = train_test_split(data2['train_id'].values,
-                                                                              data2['label'].values, test_size=int(0.8 * args.num_labeled),train_size=args.num_labeled+20000,
+    train_data, dev_data, train_label, dev_label = train_test_split(data2['train_id'].values,
+                                                                              data2['label'].values, test_size=int(0.8 * args.num_labeled),train_size=args.num_labeled+args.num_unlabeled,
                                                                               random_state=2333)
-    devdata, devlabel = torch.tensor(dev_data['train_id'] , dtype=torch.long), torch.tensor(dev_data['label'] , dtype=torch.long)
 
-    #
-    # # (self, dataset, args, model, mode, train_data, train_label, test_data, test_label):
 
     train_labeled_dataset = Base_dataset(args,model =args.model, mode="labeled",
-                                                  train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
+                                                  train_data=train_data,test_data=dev_data, train_label=train_label, test_label=dev_label)
     train_unlabeled_dataset =Base_dataset(args,model =args.model, mode="unlabeled",
-                                                   train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
-    test_dataset =Base_dataset(args,model = args.model,mode="test",
-                                        train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
-    dev_dataset = Base_dataset(args, model=args.model, mode="test",
-                                train_data=devdata, test_data=devdata, train_label=devlabel,
-                                test_label=devlabel)
+                                                   train_data=train_data,test_data=dev_data, train_label=train_label, test_label=dev_label)
+    dev_dataset =Base_dataset(args,model = args.model,mode="test",
+                                        train_data=train_data,test_data=dev_data, train_label=train_label, test_label=dev_label)
 
-    return train_labeled_dataset, train_unlabeled_dataset, test_dataset,dev_dataset
+
+    return train_labeled_dataset, train_unlabeled_dataset, dev_dataset,test_dataset
+
 
 def get_Yelp(args):
     pretrained_weights = 'bert-base-cased'
@@ -360,7 +365,7 @@ def get_Yelp(args):
         data2 = data.sample(frac= 0.04, random_state=args.seed)
         logger.info(f"frac:0.04")
     if args.num_labeled == 10000:
-        data2 = data.sample(frac= 0.1, random_state=args.seed)
+        data2 = data.sample(frac= 0.5, random_state=args.seed)
         logger.info(f"frac:0.5")
     # 256参数来源
     # if args.num_labeled == 100:
@@ -372,24 +377,26 @@ def get_Yelp(args):
     # if args.num_labeled == 10000:
     #     data2 = data.sample(frac= 0.5, random_state=args.seed)
     #     logger.info(f"frac:0.2")
-
-
-    data2['train_id'] = data2['text'].apply(tokenizen)
-    dev_data['train_id'] = dev_data['text'].apply(tokenizen)
-
-
-
     def modifylabel(row):
         return row - 1
 
-    data2["label"] = data2["label"].apply(modifylabel)
+    dev_data['train_id'] = dev_data['text'].apply(tokenizen)
     dev_data["label"] = dev_data["label"].apply(modifylabel)
+    devdata, devlabel = torch.tensor(dev_data['train_id'] , dtype=torch.long), torch.tensor(dev_data['label'] , dtype=torch.long)
+    dev_dataset = Base_dataset(args, model=args.model, mode="test",
+                                train_data=devdata, test_data=devdata, train_label=devlabel,
+                                test_label=devlabel)
+    if args.evaluate == True:
+        return dev_dataset
+
+    data2['train_id'] = data2['text'].apply(tokenizen)
+    data2["label"] = data2["label"].apply(modifylabel)
+
 
 
     train_data, test_data, train_label, test_label = train_test_split(data2['train_id'].values,
                                                                               data2['label'].values, test_size=int(0.8 * args.num_labeled),train_size=args.num_labeled+args.num_unlabeled,
                                                                               random_state=args.seed)
-    devdata, devlabel = torch.tensor(dev_data['train_id'] , dtype=torch.long), torch.tensor(dev_data['label'] , dtype=torch.long)
 
     #
     # # (self, dataset, args, model, mode, train_data, train_label, test_data, test_label):
@@ -400,9 +407,80 @@ def get_Yelp(args):
                                                    train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
     test_dataset =Base_dataset(args,model = args.model,mode="test",
                                         train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
+
+
+    return train_labeled_dataset, train_unlabeled_dataset, test_dataset,dev_dataset
+def get_Yahoo(args):
+    pretrained_weights = 'bert-base-cased'
+
+    model_class = BertForSequenceClassification
+    tokenizer_class = BertTokenizer
+
+    tokenizer = tokenizer_class.from_pretrained(pretrained_weights, do_lower_case=False)
+
+    def tokenizen(sent):
+
+        # sent = tokenizer.encode(sent)
+        #
+        # return  sent[:lg - 2]  + [0] * (lg - len(sent[:lg - 2]) - 2)
+        encoded_dict = tokenizer(sent, max_length=args.max_len, padding='max_length', truncation=True, )
+        return encoded_dict['input_ids'],  encoded_dict['attention_mask']
+
+
+
+    data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/Yahoo/train.csv',names = ["no","label","text"])
+    dev_data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/Yahoo/test.csv',names = ["no","label","text"])
+    #136参数来源
+    if args.num_labeled == 100:
+        data2 = data.sample(frac= 0.04, random_state=args.seed)
+        logger.info(f"frac:0.04")
+    if args.num_labeled == 1000:
+        data2 = data.sample(frac= 0.04, random_state=args.seed)
+        logger.info(f"frac:0.04")
+    if args.num_labeled == 10000:
+        data2 = data.sample(frac= 0.05, random_state=args.seed)
+        logger.info(f"frac:0.5")
+    # 256参数来源
+    # if args.num_labeled == 100:
+    #     data2 = data.sample(frac= 0.04, random_state=args.seed)
+    #     logger.info(f"frac:0.04")
+    # if args.num_labeled == 1000:
+    #     data2 = data.sample(frac= 0.08, random_state=args.seed)
+    #     logger.info(f"frac:0.04")
+    # if args.num_labeled == 10000:
+    #     data2 = data.sample(frac= 0.5, random_state=args.seed)
+    #     logger.info(f"frac:0.2")
+    def modifylabel(row):
+        return row - 1
+
+    dev_data['train_id'] = dev_data['text'].apply(tokenizen)
+    dev_data["label"] = dev_data["label"].apply(modifylabel)
+    devdata, devlabel = torch.tensor(dev_data['train_id'] , dtype=torch.long), torch.tensor(dev_data['label'] , dtype=torch.long)
     dev_dataset = Base_dataset(args, model=args.model, mode="test",
                                 train_data=devdata, test_data=devdata, train_label=devlabel,
                                 test_label=devlabel)
+    if args.evaluate == True:
+        return dev_dataset
+
+    data2['train_id'] = data2['text'].apply(tokenizen)
+    data2["label"] = data2["label"].apply(modifylabel)
+
+
+
+    train_data, test_data, train_label, test_label = train_test_split(data2['train_id'].values,
+                                                                              data2['label'].values, test_size=int(0.8 * args.num_labeled),train_size=args.num_labeled+args.num_unlabeled,
+                                                                              random_state=args.seed)
+
+    #
+    # # (self, dataset, args, model, mode, train_data, train_label, test_data, test_label):
+
+    train_labeled_dataset = Base_dataset(args,model =args.model, mode="labeled",
+                                                  train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
+    train_unlabeled_dataset =Base_dataset(args,model =args.model, mode="unlabeled",
+                                                   train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
+    test_dataset =Base_dataset(args,model = args.model,mode="test",
+                                        train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
+
 
     return train_labeled_dataset, train_unlabeled_dataset, test_dataset,dev_dataset
 
@@ -411,6 +489,6 @@ DATASET_GETTERS = {'base':get_base,
                    'tianchi_dev':get_tianchi_dev,
                    'AGNews':get_AGNews,
                    'Yelp':get_Yelp,
+                   'Yahoo':get_Yahoo
 
                    }
-print("AAAAA")

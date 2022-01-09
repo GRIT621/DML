@@ -26,22 +26,25 @@ EARLY_STOPPING_STEPS = 5
 
 
 class Model(nn.Module):
-    def __init__(self,args,drop=0.7):
+    def __init__(self,args):
         super().__init__()
         self.encoder = BertModel.from_pretrained('bert-base-cased')
 
         self.embedding_size = self.encoder.pooler.dense.out_features #bert-base
 #         self.embedding_size = encoder.pooler.out_features #albert
         self.fc = nn.Linear(self.embedding_size, args.num_classes)
-        self.dropout = nn.Dropout(drop)
+        self.dropout = nn.Dropout(args.drop)
+
 #         self.sig = nn.Sigmoid()
     def forward(self, x):
+
         x = self.encoder(input_ids=x[:, 0, :], attention_mask=x[:,1, :])[0]
         #print(x.size())
 #         x = self.gru(x)
 
-        x = x.mean(1)
-        x = self.dropout(x)
-        #x = attention_module(x)
-        x = self.fc(x)
-        return x
+        x_feature = x.mean(1)
+        x_feature = self.dropout(x_feature)
+        # x = attention_module(x)
+        x_class = self.fc(x_feature)
+
+        return x_class

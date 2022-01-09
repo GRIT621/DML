@@ -37,12 +37,12 @@ import warnings
 warnings.filterwarnings('ignore')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='Yelp100',type=str,help='experiment name')
+parser.add_argument('--name', default='Yahoo1000-lr3e-4',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
 parser.add_argument('--save-path', default='./f-checkpoint', type=str, help='save path')
-parser.add_argument('--dataset', default='Yelp', type=str,
+parser.add_argument('--dataset', default='Yahoo', type=str,
                     choices=['base'], help='dataset name')
-parser.add_argument('--num_labeled', type=int, default=100, help='number of labeled data')
+parser.add_argument('--num_labeled', type=int, default=1000, help='number of labeled data')
 parser.add_argument('--num_unlabeled', type=int, default=20000, help='number of unlabeled data')
 parser.add_argument("--expand-labels", action="store_true", help="expand labels to fit eval steps")
 parser.add_argument('--total-steps', default=2000, type=int, help='number of total steps to run')
@@ -55,8 +55,8 @@ parser.add_argument('--resize', default=32, type=int, help='resize image')
 parser.add_argument('--batch-size', default=32, type=int, help='train batch size')
 parser.add_argument('--teacher-dropout', default=0, type=float, help='dropout on last dense layer')
 parser.add_argument('--student-dropout', default=0, type=float, help='dropout on last dense layer')
-parser.add_argument('--teacher_lr', default=0.0005, type=float, help='train learning late')
-parser.add_argument('--student_lr', default=0.0005, type=float, help='train learning late')
+parser.add_argument('--teacher_lr', default= 0.0001, type=float, help='train learning late')
+parser.add_argument('--student_lr', default= 0.0001, type=float, help='train learning late')
 parser.add_argument('--momentum', default=0.9, type=float, help='SGD Momentum')
 parser.add_argument('--nesterov', action='store_true', help='use nesterov')
 parser.add_argument('--weight-decay', default= 0, type=float, help='train weight decay')
@@ -77,7 +77,7 @@ parser.add_argument('--seed', default=2333, type=int, help='seed for initializin
 parser.add_argument('--label-smoothing', default=0, type=float, help='label smoothing alpha')
 parser.add_argument('--mu', default=7, type=int, help='coefficient of unlabeled batch size')
 parser.add_argument('--threshold', default=0.95, type=float, help='pseudo label threshold')
-parser.add_argument('--temperature', default=0.5, type=float, help='pseudo label temperature')
+parser.add_argument('--temperature', default=1, type=float, help='pseudo label temperature')
 parser.add_argument('--lambda-u', default=1, type=float, help='coefficient of unlabeled loss')
 parser.add_argument('--uda-steps', default=1, type=float, help='warmup steps of lambda-u')
 parser.add_argument("--randaug", nargs="+", type=int, help="use it like this. --randaug 2 10")
@@ -92,7 +92,7 @@ parser.add_argument('--mode', default='train',type=str,help='mode name')
 parser.add_argument("--gpu_ids", type=list, default= [0], help="gpu-ids")
 parser.add_argument('--drop', default=0.7, type=float, help='SGD Momentum')
 
-parser.add_argument("--gpu", type=str, default= '7',help="gpu")
+parser.add_argument("--gpu", type=str, default= '5',help="gpu")
 
 
 
@@ -321,7 +321,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             s_loss = reduce_tensor(s_loss.detach(), args.world_size)
             t_loss = reduce_tensor(t_loss.detach(), args.world_size)
             t_loss_l = reduce_tensor(t_loss_l.detach(), args.world_size)
-            t_loss_u = reduce_tensor(t_loss_u.detach(), args.world_size)
+            # t_loss_u = reduce_tensor(t_loss_u.detach(), args.world_size)
             # t_loss_mpl = reduce_tensor(t_loss_mpl.detach(), args.world_size)
             mask = reduce_tensor(mask, args.world_size)
 
@@ -330,8 +330,8 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
         t_losses_l.update(t_loss_l.item())
         # t_losses_u.update(t_loss_u.item())
-        # t_losses_mpl.update(t_loss_mpl.item())
-        # mean_mask.update(mask.mean().item())
+        t_losses_mpl.update(t_loss_mpl.item())
+        mean_mask.update(mask.mean().item())
 
 
         batch_time.update(time.time() - end)
@@ -606,9 +606,6 @@ def main():
     args.best_top5 = 0.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
-    if args.num_labeled == 100:
-        args.teacher_lr = 0.0001
-        args.student_lr = 0.0001
     if args.dataset == "Yelp":
         args.batch_size = 4
         args.max_len = 256
@@ -621,6 +618,17 @@ def main():
         args.max_len = 256
         args.num_classes = 10
         args.num_unlabeled = 40000
+        if args.num_labeled == 100:
+            args.total_steps = 5000
+
+        elif args.num_labeled == 1000:
+            args.total_steps = 15000
+            args.teacher_lr = 0.00007
+            args.student_lr = 0.00007
+        elif args.num_labeled == 10000:
+            args.total_steps = 30000
+            args.teacher_lr = 0.0001
+            args.student_lr = 0.0001
 
 
 
