@@ -37,26 +37,26 @@ import warnings
 warnings.filterwarnings('ignore')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='Yahoo1000-lr3e-4',type=str,help='experiment name')
+parser.add_argument('--name', default='AGNews100-NTTM-resum5',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
 parser.add_argument('--save-path', default='./f-checkpoint', type=str, help='save path')
-parser.add_argument('--dataset', default='Yahoo', type=str,
+parser.add_argument('--dataset', default='AGNews', type=str,
                     choices=['base'], help='dataset name')
-parser.add_argument('--num_labeled', type=int, default=1000, help='number of labeled data')
+parser.add_argument('--num_labeled', type=int, default=100, help='number of labeled data')
 parser.add_argument('--num_unlabeled', type=int, default=20000, help='number of unlabeled data')
 parser.add_argument("--expand-labels", action="store_true", help="expand labels to fit eval steps")
-parser.add_argument('--total-steps', default=2000, type=int, help='number of total steps to run')
+parser.add_argument('--total-steps', default=30000, type=int, help='number of total steps to run')
 parser.add_argument('--eval-step', default=100, type=int, help='number of eval steps to run')
 parser.add_argument('--start-step', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--workers', default=4, type=int, help='number of workers')
 parser.add_argument('--num_classes', default=5, type=int, help='number of classes')
 parser.add_argument('--resize', default=32, type=int, help='resize image')
-parser.add_argument('--batch-size', default=32, type=int, help='train batch size')
+parser.add_argument('--batch-size', default=4, type=int, help='train batch size')
 parser.add_argument('--teacher-dropout', default=0, type=float, help='dropout on last dense layer')
 parser.add_argument('--student-dropout', default=0, type=float, help='dropout on last dense layer')
-parser.add_argument('--teacher_lr', default= 0.0001, type=float, help='train learning late')
-parser.add_argument('--student_lr', default= 0.0001, type=float, help='train learning late')
+parser.add_argument('--teacher_lr', default=0.0005, type=float, help='train learning late')
+parser.add_argument('--student_lr', default=0.0005, type=float, help='train learning late')
 parser.add_argument('--momentum', default=0.9, type=float, help='SGD Momentum')
 parser.add_argument('--nesterov', action='store_true', help='use nesterov')
 parser.add_argument('--weight-decay', default= 0, type=float, help='train weight decay')
@@ -77,7 +77,7 @@ parser.add_argument('--seed', default=2333, type=int, help='seed for initializin
 parser.add_argument('--label-smoothing', default=0, type=float, help='label smoothing alpha')
 parser.add_argument('--mu', default=7, type=int, help='coefficient of unlabeled batch size')
 parser.add_argument('--threshold', default=0.95, type=float, help='pseudo label threshold')
-parser.add_argument('--temperature', default=1, type=float, help='pseudo label temperature')
+parser.add_argument('--temperature', default=0.1, type=float, help='pseudo label temperature')
 parser.add_argument('--lambda-u', default=1, type=float, help='coefficient of unlabeled loss')
 parser.add_argument('--uda-steps', default=1, type=float, help='warmup steps of lambda-u')
 parser.add_argument("--randaug", nargs="+", type=int, help="use it like this. --randaug 2 10")
@@ -86,15 +86,15 @@ parser.add_argument('--world-size', default= -1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument("--local_rank", type=int, default= -1,
                     help="For distributed training: clocal_rank")
-parser.add_argument('--max_len', default=64, type=int, help='text_len')
+parser.add_argument('--max_len', default=256, type=int, help='text_len')
 parser.add_argument('--model', default='bert',type=str,help='model name')
 parser.add_argument('--mode', default='train',type=str,help='mode name')
 parser.add_argument("--gpu_ids", type=list, default= [0], help="gpu-ids")
 parser.add_argument('--drop', default=0.7, type=float, help='SGD Momentum')
-
-parser.add_argument("--gpu", type=str, default= '5',help="gpu")
-
-
+parser.add_argument('--pretrain', default=True, action='store_true', help='only evaluate model on validation set')
+parser.add_argument('--NTM', default=True, type=float, help='NTM')
+parser.add_argument("--gpu", type=str, default= '3',help="gpu")
+parser.add_argument('--alpha', default=0.6, type=float, help='feature')
 
 def setup_seed(seed):
    torch.manual_seed(seed)
@@ -132,10 +132,29 @@ def get_cosine_schedule_with_warmup(optimizer,
 def get_lr(optimizer):
     return optimizer.param_groups[0]['lr']
 
+def use_clean_update_T(args,s_logits,clean_features,clean_label,T_feature,T_NTM):
+    with torch.no_grad():
+        class_num = [0] * args.num_classes
+        T_feature_new =torch.zeros(768,args.num_classes).to(args.device)
+        T_NTM_new = torch.zeros(args.num_classes,args.num_classes).to(args.device)
+        for feature,label in zip(clean_features, clean_label):
+            T_feature_new[:,label] = T_feature_new[:,label] + feature
+            class_num[label] = class_num[label]  + 1
+        max_probs, noisy_labels = torch.max(s_logits, dim=-1)
+        for real_label,noisy_label, prob in zip(noisy_labels,clean_label,max_probs):
+            T_NTM[real_label][noisy_label] += prob
+
+        for i in range(args.num_classes):
+            if class_num[i] == 0:
+                continue
+            T_feature_new[:,i] /= class_num[i]
+            T_NTM_new[i,:] /= class_num[i]
+        return args.alpha * T_feature + (1 - args.alpha) * T_feature_new, args.alpha * T_NTM + (1 - args.alpha) * T_NTM_new
+
 
 def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                teacher_model, student_model, avg_student_model, criterion,
-               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler):
+               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler,T_feature,T_NTM):
     criteria = nn.KLDivLoss()
     torch.cuda.empty_cache()
     logger.info("***** Running Training *****")
@@ -201,7 +220,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
             batch_size = text_l.shape[0]
             t_text = torch.cat((text_l, text_uw, text_us))
-            t_logits = teacher_model(t_text)
+            t_logits,_ = teacher_model(t_text)
 
             t_logits_l = t_logits[:batch_size]
             t_logits_uw, t_logits_us = t_logits[batch_size:].chunk(2)
@@ -227,18 +246,19 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
 
             ######################################################################################
-            #kl1
-            mask = max_probs.ge(args.threshold).float()
-            t_loss_u = torch.mean(
-                -(soft_pseudo_label * torch.log_softmax(t_logits_us, dim=-1)).sum(dim=-1) * mask
-            )
-
-            weight_u = args.lambda_u * min(1., (step+1) / args.uda_steps)
-            # t_loss_uda = t_loss_l + weight_u * t_loss_u
-            ts_loss_uda = t_loss_l + weight_u * t_loss_u#t_loss_uda
+            #org
+            # mask = max_probs.ge(args.threshold).float()
+            # t_loss_u = torch.mean(
+            #     -(soft_pseudo_label * torch.log_softmax(t_logits_us, dim=-1)).sum(dim=-1) * mask
+            # )
+            #
+            # weight_u = args.lambda_u * min(1., (step+1) / args.uda_steps)
+            # # t_loss_uda = t_loss_l + weight_u * t_loss_u
+            # ts_loss_uda = t_loss_l + weight_u * t_loss_u#t_loss_uda
             ######################################################################################
-            # t_loss_simi1 = criteria(torch.log_softmax(t_logits_us,dim = -1) , torch.softmax(t_logits_uw, dim = -1))
-            # ts_loss_uda = t_loss_l + t_loss_simi1
+            # kl1
+            t_loss_simi1 = criteria(torch.log_softmax(t_logits_us,dim = -1) , torch.softmax(t_logits_uw, dim = -1))
+            ts_loss_uda = t_loss_l + t_loss_simi1
             ######################################################################################
 
 
@@ -248,11 +268,15 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
 
             s_text = torch.cat((text_l, text_us))
-            s_logits = student_model(s_text)
+            s_logits, s_feature = student_model(s_text)
             s_logits_l = s_logits[:batch_size]
+            if args.NTM == True:
+                T_feature,T_NTM = use_clean_update_T(args,s_logits_l,s_feature[:batch_size].detach(),targets,T_feature,T_NTM)
+
             # s_logits_lf = s_logitsf[:batch_size]
             # print("@@@@@@@@old",s_logits_l)
             s_logits_us = s_logits[batch_size:]
+            s_feature_us =  s_feature[batch_size:]
             # s_logits_usf = s_logitsf[batch_size:]
             #del s_logits
             s_loss_l_old = F.cross_entropy(s_logits_l, targets)
@@ -266,16 +290,24 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             ######################################################################################
 
             ######################################################################################
-            #org
-            s_loss = criterion(s_logits_us, hard_pseudo_label)
+            # #org
+            # s_loss = criterion(s_logits_us, hard_pseudo_label)
             ######################################################################################
             # kl2
-            # a= torch.log_softmax(s_logits_us , dim = -1)
-            # b = torch.softmax(t_logits_us, dim = -1)
-            # # b = soft_pseudo_label
-            # s_loss_simi2 = criteria(a, b)
-            # s_loss = criterion(s_logits_us, hard_pseudo_label)
-            # s_loss = s_loss_simi2 + s_loss
+            a= torch.log_softmax(s_logits_us , dim = -1)
+            b = torch.softmax(t_logits_us, dim = -1)
+            # b = soft_pseudo_label
+            s_loss_simi2 = criteria(a, b)
+
+
+            if args.NTM:
+                feature_balance = torch.mm(s_feature_us, T_feature)
+                feature_balance = torch.softmax(feature_balance,dim = -1)
+                logits = s_logits_us + 0.3 * feature_balance
+                s_loss = criterion(logits * T_NTM, hard_pseudo_label)
+            else:
+                s_loss = criterion(s_logits_us, hard_pseudo_label)
+            s_loss = s_loss_simi2 + s_loss
             ######################################################################################
 
             # print("      ")
@@ -292,8 +324,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
         with amp.autocast(enabled=args.amp):
             with torch.no_grad():
-                s_logits_l1 = student_model(text_l)
-                # print("@@@@@@@@new",s_logits_l)
+                s_logits_l1,_ = student_model(text_l)
             s_loss_l_new = F.cross_entropy(s_logits_l1.detach(), targets)
             # # dot_product = s_loss_l_new - st_loss_l_old
             # # test
@@ -304,6 +335,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             t_loss_mpl = dot_product * F.cross_entropy(t_logits_us, hard_pseudo_label)
             # t_loss_mpl.backward()
             t_loss = ts_loss_uda + t_loss_mpl
+            # t_loss = ts_loss_uda
             #
             # print("``````teacher`````",t_loss_mpl.item(), t_loss_l.item(), t_loss.item())
 
@@ -321,7 +353,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             s_loss = reduce_tensor(s_loss.detach(), args.world_size)
             t_loss = reduce_tensor(t_loss.detach(), args.world_size)
             t_loss_l = reduce_tensor(t_loss_l.detach(), args.world_size)
-            # t_loss_u = reduce_tensor(t_loss_u.detach(), args.world_size)
+            t_loss_u = reduce_tensor(t_loss_u.detach(), args.world_size)
             # t_loss_mpl = reduce_tensor(t_loss_mpl.detach(), args.world_size)
             mask = reduce_tensor(mask, args.world_size)
 
@@ -330,8 +362,8 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
         t_losses_l.update(t_loss_l.item())
         # t_losses_u.update(t_loss_u.item())
-        t_losses_mpl.update(t_loss_mpl.item())
-        mean_mask.update(mask.mean().item())
+        # t_losses_mpl.update(t_loss_mpl.item())
+        # mean_mask.update(mask.mean().item())
 
 
         batch_time.update(time.time() - end)
@@ -435,8 +467,7 @@ def evaluate(args, dev_loader, model, criterion):
             targets = targets.to(args.device)
             target = targets.detach().cpu().numpy().tolist()
             with amp.autocast(enabled=args.amp):
-                outputs = model(text)
-
+                outputs,_ = model(text)
                 outputs = F.softmax(outputs, dim=1)
                 op = outputs.detach().cpu().numpy().tolist()
                 for output in op:
@@ -481,7 +512,7 @@ def inference_fn(args,model, dataloader):
     for data in dataloader:
         inputs, targets = data[0].to(args.device), data[1].to(args.device)
         with torch.no_grad():
-            outputs = model(inputs)
+            outputs,_ = model(inputs)
             labels = targets.data.cpu().numpy()
             predic = torch.max(outputs.data, 1)[1].cpu().numpy()
 
@@ -493,7 +524,8 @@ def inference_fn(args,model, dataloader):
     maf1 = f1_score(labels_all, predict_all, average='macro')
     report = metrics.classification_report(labels_all, predict_all, digits=4)
     confusion = metrics.confusion_matrix(labels_all, predict_all)
-    return report, confusion,mif1,maf1
+
+    return report, confusion,mif1,maf1,predict_all
 
 def finetune(args, train_loader, dev_loader, model, criterion):
     train_sampler = RandomSampler if args.local_rank == -1 else DistributedSampler
@@ -606,6 +638,9 @@ def main():
     args.best_top5 = 0.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
+    if args.num_labeled == 100:
+        args.teacher_lr = 0.0001
+        args.student_lr = 0.0001
     if args.dataset == "Yelp":
         args.batch_size = 4
         args.max_len = 256
@@ -613,22 +648,25 @@ def main():
             args.total_steps = 2000
         elif args.num_labeled == 1000:
             args.total_steps = 15000
+        elif args.num_labeled == 10000:
+            args.total_steps = 40000
     if args.dataset == "Yahoo":
         args.batch_size = 4
         args.max_len = 256
         args.num_classes = 10
         args.num_unlabeled = 40000
-        if args.num_labeled == 100:
-            args.total_steps = 5000
 
-        elif args.num_labeled == 1000:
+        if args.num_labeled == 100:
+            args.teacher_lr = 0.00003
+            args.student_lr = 0.00003
             args.total_steps = 15000
+        elif args.num_labeled == 1000:
             args.teacher_lr = 0.00007
             args.student_lr = 0.00007
         elif args.num_labeled == 10000:
-            args.total_steps = 30000
             args.teacher_lr = 0.0001
             args.student_lr = 0.0001
+
 
 
 
@@ -751,15 +789,16 @@ def main():
     #                         # weight_decay=args.weight_decay,
     #                         nesterov=args.nesterov)
     #不同学习率
+    # Linear = nn.Linear(args.batch_size, args.num_classes).to(args.device)
     t_optimizer = optim.SGD([{'params':teacher_model.module.encoder.parameters()},{'params':teacher_model.module.fc.parameters(),'lr':0.001}],
                             lr=args.teacher_lr,
                             momentum=args.momentum,
-                            # weight_decay=args.weight_decay,
+                            weight_decay=args.weight_decay,
                             nesterov=args.nesterov)
-    s_optimizer = optim.SGD([{'params':student_model.module.encoder.parameters()},{'params':student_model.module.fc.parameters(),'lr':0.001}],
+    s_optimizer = optim.SGD([{'params':student_model.module.encoder.parameters()},{'params':student_model.module.fc.parameters(),'lr':0.001}],# ,{"params":Linear.parameters(),'lr':0.0001}
                             lr=args.student_lr,
                             momentum=args.momentum,
-                            # weight_decay=args.weight_decay,
+                            weight_decay=args.weight_decay,
                             nesterov=args.nesterov)
 
     t_scheduler = get_cosine_schedule_with_warmup(t_optimizer,
@@ -817,12 +856,24 @@ def main():
         finetune(args, labeled_loader, dev_loader, student_model, criterion)
         return
 
+    # if args.evaluate:
+    #     del t_scaler, t_scheduler, t_optimizer, teacher_model
+    #     del s_scaler, s_scheduler, s_optimizer
+    #     # evaluate(args, dev_loader, teacher_model, criterion)
+    #     # df_sub = pd.read_csv("/home/lsj0920/mpl-pytorch-main-yelp/dataset/Yahoo/test.csv", names=["a","b","text"])
+    #
+    #     report, confusion,mif1,maf1,predict_all =inference_fn(args, student_model, test_loader)
+    #     print(report, confusion,mif1,maf1)
+    #     # df_sub["pre"] =predict_all
+    #     # df_sub.to_csv("DPS.csv",index = False)
+    #     # print("finish!!!!!")
+    #     return
     if args.evaluate:
         del t_scaler, t_scheduler, t_optimizer, teacher_model
         del s_scaler, s_scheduler, s_optimizer
         # evaluate(args, dev_loader, teacher_model, criterion)
 
-        report, confusion,mif1,maf1 =inference_fn(args, student_model, test_loader)
+        report, confusion,mif1,maf1,predict_all =inference_fn(args, student_model, test_loader)
         print(report, confusion,mif1,maf1)
         return
 
@@ -830,16 +881,39 @@ def main():
 
     teacher_model.zero_grad()
     student_model.zero_grad()
+    if args.pretrain == True:
+        T_NTM = torch.zeros(args.num_classes, args.num_classes).to(args.device)
+        class_num = [0] * args.num_classes
+        with torch.no_grad():
+            for i, (input, target) in enumerate(labeled_loader):
+                # teacher_model.train()
+                input = input.to(args.device)
+                target = target.to(args.device)
+                model_out,_ = teacher_model(input)
+                max_probs, noisy_labels = torch.max(model_out, dim=-1)
+                for real_label, noisy_label, prob in zip(noisy_labels, target, max_probs):
+                    T_NTM[real_label][noisy_label] += prob
+                    # class_num[]
+            for i in range(args.num_classes):
+                    if class_num[i] == 0:
+                        continue
+                    T_NTM[i, :] /= class_num[i]
+
+
+
+
+    T_feature = torch.zeros(768, 4).to(args.device)
+    # T_NTM = torch.zeros(args.num_classes,args.num_classes).to(args.device)
     train_loop(args, labeled_loader, unlabeled_loader, dev_loader, test_loader,
                teacher_model, student_model, avg_student_model, criterion,
-               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler)
-    report, confusion, mif1, maf1 = inference_fn(args, student_model, test_loader)
+               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler,T_feature,T_NTM)
+    report, confusion, mif1, maf1,_ = inference_fn(args, student_model, test_loader)
     print("@@@@@@@@@@@@@@@@1",report, confusion, mif1, maf1)
 
     args.resume = f'{args.save_path}/{args.name}_best.pth.tar'
     checkpoint = torch.load(args.resume, map_location=args.device)
     model_load_state_dict(student_model, checkpoint['student_state_dict'])
-    report, confusion, mif1, maf1 = inference_fn(args, student_model, test_loader)
+    report, confusion, mif1, maf1,_ = inference_fn(args, student_model, test_loader)
     print("@@@@@@@@@@@@@@@@@@@@@2",report, confusion, mif1, maf1)
 
     return
@@ -847,3 +921,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    # print(torch.cuda.is_available())
