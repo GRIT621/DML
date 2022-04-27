@@ -37,12 +37,12 @@ import warnings
 warnings.filterwarnings('ignore')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='AGNews1000-NTTM-softmaxnew',type=str,help='experiment name')
+parser.add_argument('--name', default='AGNews10000-NTTM-softmax',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
 parser.add_argument('--save-path', default='./f-checkpoint', type=str, help='save path')
 parser.add_argument('--dataset', default='AGNews', type=str,
                     choices=['base'], help='dataset name')
-parser.add_argument('--num_labeled', type=int, default=1000, help='number of labeled data')
+parser.add_argument('--num_labeled', type=int, default=10000, help='number of labeled data')
 parser.add_argument('--num_unlabeled', type=int, default=20000, help='number of unlabeled data')
 parser.add_argument("--expand-labels", action="store_true", help="expand labels to fit eval steps")
 parser.add_argument('--total-steps', default=30000, type=int, help='number of total steps to run')
@@ -93,7 +93,7 @@ parser.add_argument("--gpu_ids", type=list, default= [0], help="gpu-ids")
 parser.add_argument('--drop', default=0.7, type=float, help='SGD Momentum')
 parser.add_argument('--pretrain', default=True, action='store_true', help='only evaluate model on validation set')
 parser.add_argument('--NTM', default=True, type=float, help='NTM')
-parser.add_argument("--gpu", type=str, default= '2',help="gpu")
+parser.add_argument("--gpu", type=str, default= '1',help="gpu")
 parser.add_argument('--alpha', default=0.6, type=float, help='feature')
 
 def setup_seed(seed):
@@ -142,7 +142,7 @@ def use_clean_update_T(args,s_logits,clean_features,clean_label,T_feature,T_NTM)
             class_num[label] = class_num[label]  + 1
         max_probs, noisy_labels = torch.max(s_logits, dim=-1)
         for real_label,noisy_label, prob in zip(noisy_labels,clean_label,max_probs):
-            T_NTM_new[real_label][noisy_label] += prob
+            T_NTM[real_label][noisy_label] += prob
 
         for i in range(args.num_classes):
             if class_num[i] == 0:
