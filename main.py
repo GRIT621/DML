@@ -37,12 +37,12 @@ import warnings
 warnings.filterwarnings('ignore')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='AGNews10000-NTTM-softmax',type=str,help='experiment name')
+parser.add_argument('--name', default='AGNews_anchor-100',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
 parser.add_argument('--save-path', default='./f-checkpoint', type=str, help='save path')
 parser.add_argument('--dataset', default='AGNews', type=str,
                     choices=['base'], help='dataset name')
-parser.add_argument('--num_labeled', type=int, default=10000, help='number of labeled data')
+parser.add_argument('--num_labeled', type=int, default=100, help='number of labeled data')
 parser.add_argument('--num_unlabeled', type=int, default=20000, help='number of unlabeled data')
 parser.add_argument("--expand-labels", action="store_true", help="expand labels to fit eval steps")
 parser.add_argument('--total-steps', default=30000, type=int, help='number of total steps to run')
@@ -50,7 +50,7 @@ parser.add_argument('--eval-step', default=100, type=int, help='number of eval s
 parser.add_argument('--start-step', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--workers', default=4, type=int, help='number of workers')
-parser.add_argument('--num_classes', default=5, type=int, help='number of classes')
+parser.add_argument('--num_classes', default=100, type=int, help='number of classes')
 parser.add_argument('--resize', default=32, type=int, help='resize image')
 parser.add_argument('--batch-size', default=4, type=int, help='train batch size')
 parser.add_argument('--teacher-dropout', default=0, type=float, help='dropout on last dense layer')
@@ -136,21 +136,39 @@ def use_clean_update_T(args,s_logits,clean_features,clean_label,T_feature,T_NTM)
     with torch.no_grad():
         class_num = [0] * args.num_classes
         T_feature_new =torch.zeros(768,args.num_classes).to(args.device)
-        T_NTM_new = torch.zeros(args.num_classes,args.num_classes).to(args.device)
+        # T_NTM_new = torch.zeros(args.num_classes,args.num_classes).to(args.device)
         for feature,label in zip(clean_features, clean_label):
             T_feature_new[:,label] = T_feature_new[:,label] + feature
             class_num[label] = class_num[label]  + 1
         max_probs, noisy_labels = torch.max(s_logits, dim=-1)
-        for real_label,noisy_label, prob in zip(noisy_labels,clean_label,max_probs):
+        for real_label,noisy_label, prob in zip(clean_label,noisy_labels,max_probs):
             T_NTM[real_label][noisy_label] += prob
 
         for i in range(args.num_classes):
             if class_num[i] == 0:
                 continue
             T_feature_new[:,i] /= class_num[i]
-            T_NTM_new[i,:] /= class_num[i]
-        return args.alpha * T_feature + (1 - args.alpha) * T_feature_new, F.softmax(args.alpha * T_NTM + (1 - args.alpha) * T_NTM_new,dim = -1)
+            # T_NTM_new[i,:] /= class_num[i]
+        return args.alpha * T_feature + (1 - args.alpha) * T_feature_new, F.softmax(T_NTM ,dim = -1) #+ (1 - args.alpha) * T_NTM_new
 
+def anchor_T(args,X, filter_outlier=False):
+    # number of classes
+    c = args.num_classes
+    T = np.empty((c, c))
+    eta_corr = X
+    for i in np.arange(c):
+        if not filter_outlier:
+            idx_best = np.argmax(eta_corr[:, i])
+        else:
+            eta_thresh = np.percentile(eta_corr[:, i], 97, interpolation='higher')
+            robust_eta = eta_corr[:, i]
+            robust_eta[robust_eta >= eta_thresh] = 0.0
+            idx_best = np.argmax(robust_eta)
+        for j in np.arange(c):
+            T[i, j] = eta_corr[idx_best, j]
+    row_sum = np.sum(T, 1)
+    T_norm = T / row_sum
+    return torch.tensor(T_norm,dtype=torch.float).to(args.device)
 
 def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                teacher_model, student_model, avg_student_model, criterion,
@@ -271,7 +289,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             s_logits, s_feature = student_model(s_text)
             s_logits_l = s_logits[:batch_size]
             if args.NTM == True:
-                T_feature,T_NTM = use_clean_update_T(args,s_logits_l,s_feature[:batch_size].detach(),targets,T_feature,T_NTM)
+                T_NTM = anchor_T(args,s_logits_l.detach().numpy(), filter_outlier=True)
 
             # s_logits_lf = s_logitsf[:batch_size]
             # print("@@@@@@@@old",s_logits_l)
@@ -303,8 +321,11 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             if args.NTM:
                 feature_balance = torch.mm(s_feature_us, T_feature)
                 feature_balance = torch.softmax(feature_balance,dim = -1)
-                logits = s_logits_us + 0.3 * feature_balance
-                s_loss = criterion(logits * T_NTM, hard_pseudo_label)
+                # logits = torch.softmax(s_logits_us,dim = -1) + 0.3 * feature_balance
+
+                s_loss = criterion(torch.mm(s_logits_us , T_NTM), hard_pseudo_label)
+
+                    # s_loss = criterion(logits, hard_pseudo_label)
             else:
                 s_loss = criterion(s_logits_us, hard_pseudo_label)
             s_loss = s_loss_simi2 + s_loss
@@ -430,7 +451,9 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                     'teacher_scaler': t_scaler.state_dict(),
                     'student_scaler': s_scaler.state_dict(),
                 }, is_best)
-
+            if args.dataset == "kg":
+                report, confusion, mif1, maf1, predict_all=inference_fn(args,student_model, labeled_loader)
+                print(report,mif1)
     if args.local_rank in [-1, 0]:
         args.writer.add_scalar("f-result/test_acc@1", args.best_top1)
         # wandb.log({"result/test_acc@1": args.best_top1})
@@ -644,6 +667,7 @@ def main():
     if args.dataset == "Yelp":
         args.batch_size = 4
         args.max_len = 256
+        args.num_classes = 5
         if args.num_labeled == 100:
             args.total_steps = 2000
         elif args.num_labeled == 1000:
@@ -663,9 +687,11 @@ def main():
         elif args.num_labeled == 1000:
             args.teacher_lr = 0.00007
             args.student_lr = 0.00007
+            args.total_steps = 40000
         elif args.num_labeled == 10000:
             args.teacher_lr = 0.0001
             args.student_lr = 0.0001
+            args.total_steps = 40000
 
 
 
@@ -882,29 +908,50 @@ def main():
     teacher_model.zero_grad()
     student_model.zero_grad()
     if args.pretrain == True:
-        T_NTM = torch.zeros(args.num_classes, args.num_classes).to(args.device)
-        class_num = [0] * args.num_classes
-        with torch.no_grad():
+        index_num = int(len(labeled_dataset) / args.batch_size)
+        X = torch.zeros((len(labeled_dataset), args.num_classes))
+        for epoch in range(10):
             for i, (input, target) in enumerate(labeled_loader):
-                # teacher_model.train()
+                t_optimizer.zero_grad()
+                teacher_model.train()
                 input = input.to(args.device)
                 target = target.to(args.device)
-                model_out,_ = teacher_model(input)
-                max_probs, noisy_labels = torch.max(model_out, dim=-1)
-                for real_label, noisy_label, prob in zip(noisy_labels, target, max_probs):
-                    T_NTM[real_label][noisy_label] += prob
-                    class_num[real_label] += 1
-            for i in range(args.num_classes):
-                    if class_num[i] == 0:
-                        continue
-                    T_NTM[i, :] /= class_num[i]
-            T_NTM = F.softmax(T_NTM,dim = -1)
+                model_out, _ = teacher_model(input)
+                loss = criterion(model_out, target)
+                if epoch == 9:
+                    if i <= index_num:
+                        X[i*args.batch_size:(i+1)*args.batch_size, :] = F.softmax(model_out)
+                    else:
+                        X[index_num*args.batch_size, len(labeled_dataset), :] = F.softmax(model_out)
+
+                loss.backward()
+                t_optimizer.step()
+
+        T_NTM = anchor_T(args,X.detach().numpy(), filter_outlier=True)
+        # T_NTM = torch.zeros(args.num_classes, args.num_classes).to(args.device)
+        # class_num = [0] * args.num_classes
+        # with torch.no_grad():
+        #     for i, (input, target) in enumerate(labeled_loader):
+        #         # teacher_model.train()
+        #         input = input.to(args.device)
+        #         target = target.to(args.device)
+        #         model_out,_ = teacher_model(input)
+        #         max_probs, noisy_labels = torch.max(model_out, dim=-1)
+        #         for real_label, noisy_label, prob in zip(target,noisy_labels,  max_probs):
+        #             T_NTM[real_label][noisy_label] += prob
+        #             class_num[real_label] += 1
+        #     for i in range(args.num_classes):
+        #             if class_num[i] == 0:
+        #                 continue
+        #             T_NTM[i, :] /= class_num[i]
+        #     T_NTM = F.softmax(torch.log(T_NTM),dim = -1)
 
 
 
 
-    T_feature = torch.zeros(768, 4).to(args.device)
-    # T_NTM = torch.zeros(args.num_classes,args.num_classes).to(args.device)
+    T_feature = torch.zeros(768, args.num_classes).to(args.device)
+    if args.pretrain == False:
+        T_NTM = torch.zeros(args.num_classes,args.num_classes).to(args.device)
     train_loop(args, labeled_loader, unlabeled_loader, dev_loader, test_loader,
                teacher_model, student_model, avg_student_model, criterion,
                t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler,T_feature,T_NTM)
