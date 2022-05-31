@@ -9,8 +9,11 @@ import numpy as np
 import torch
 from torch.cuda import amp
 from torch import nn
+from copy import copy
 from torch.nn import functional as F
 from torch import optim
+
+from collections import OrderedDict
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
@@ -19,7 +22,10 @@ from sklearn import metrics
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from transformers import AutoTokenizer, AutoModel, AutoConfig, BertTokenizer, BertModel, BertConfig, BertForSequenceClassification
 from sklearn.model_selection import KFold, train_test_split
+from transformers import logging as logg
 
+logg.set_verbosity_warning()
+logg.set_verbosity_error()
 from torch.autograd import Variable
 # import wandb
 
@@ -37,10 +43,10 @@ import warnings
 warnings.filterwarnings('ignore')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='AGNews_anchor-100',type=str,help='experiment name')
+parser.add_argument('--name', default='Yelp-newNTM-100-resume',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
 parser.add_argument('--save-path', default='./f-checkpoint', type=str, help='save path')
-parser.add_argument('--dataset', default='AGNews', type=str,
+parser.add_argument('--dataset', default='Yelp', type=str,
                     choices=['base'], help='dataset name')
 parser.add_argument('--num_labeled', type=int, default=100, help='number of labeled data')
 parser.add_argument('--num_unlabeled', type=int, default=20000, help='number of unlabeled data')
@@ -77,7 +83,7 @@ parser.add_argument('--seed', default=2333, type=int, help='seed for initializin
 parser.add_argument('--label-smoothing', default=0, type=float, help='label smoothing alpha')
 parser.add_argument('--mu', default=7, type=int, help='coefficient of unlabeled batch size')
 parser.add_argument('--threshold', default=0.95, type=float, help='pseudo label threshold')
-parser.add_argument('--temperature', default=0.1, type=float, help='pseudo label temperature')
+parser.add_argument('--temperature', default=0.5, type=float, help='pseudo label temperature')
 parser.add_argument('--lambda-u', default=1, type=float, help='coefficient of unlabeled loss')
 parser.add_argument('--uda-steps', default=1, type=float, help='warmup steps of lambda-u')
 parser.add_argument("--randaug", nargs="+", type=int, help="use it like this. --randaug 2 10")
@@ -89,11 +95,11 @@ parser.add_argument("--local_rank", type=int, default= -1,
 parser.add_argument('--max_len', default=256, type=int, help='text_len')
 parser.add_argument('--model', default='bert',type=str,help='model name')
 parser.add_argument('--mode', default='train',type=str,help='mode name')
-parser.add_argument("--gpu_ids", type=list, default= [0], help="gpu-ids")
+parser.add_argument("--gpu_ids", type=list, default= [0,1,2,3], help="gpu-ids")
 parser.add_argument('--drop', default=0.7, type=float, help='SGD Momentum')
-parser.add_argument('--pretrain', default=True, action='store_true', help='only evaluate model on validation set')
+parser.add_argument('--pretrain', default=False, action='store_true', help='only evaluate model on validation set')
 parser.add_argument('--NTM', default=True, type=float, help='NTM')
-parser.add_argument("--gpu", type=str, default= '1',help="gpu")
+parser.add_argument("--gpu", type=str, default= '0,1,2,3',help="gpu")
 parser.add_argument('--alpha', default=0.6, type=float, help='feature')
 
 def setup_seed(seed):
@@ -131,6 +137,10 @@ def get_cosine_schedule_with_warmup(optimizer,
 
 def get_lr(optimizer):
     return optimizer.param_groups[0]['lr']
+
+def to_var(x, requires_grad=True):
+    x = x.cuda()
+    return Variable(x, requires_grad=requires_grad)
 
 def use_clean_update_T(args,s_logits,clean_features,clean_label,T_feature,T_NTM):
     with torch.no_grad():
@@ -172,7 +182,7 @@ def anchor_T(args,X, filter_outlier=False):
 
 def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                teacher_model, student_model, avg_student_model, criterion,
-               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler,T_feature,T_NTM):
+               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler):
     criteria = nn.KLDivLoss()
     torch.cuda.empty_cache()
     logger.info("***** Running Training *****")
@@ -206,6 +216,8 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
         teacher_model.train()
         student_model.train()
+        # for name, params in student_model.named_buffers():
+        #     print("@@@@",name)
         end = time.time()
 
         try:
@@ -235,7 +247,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
         text_us = text_us.to(args.device)
         targets = targets.to(args.device)
         with amp.autocast(enabled=args.amp):
-
+            # print(teacher_model.state_dict()['module.encoder.encoder.layer.11.intermediate.dense.weight'])
             batch_size = text_l.shape[0]
             t_text = torch.cat((text_l, text_uw, text_us))
             t_logits,_ = teacher_model(t_text)
@@ -274,31 +286,92 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             # # t_loss_uda = t_loss_l + weight_u * t_loss_u
             # ts_loss_uda = t_loss_l + weight_u * t_loss_u#t_loss_uda
             ######################################################################################
-            # kl1
+            # kl1f
             t_loss_simi1 = criteria(torch.log_softmax(t_logits_us,dim = -1) , torch.softmax(t_logits_uw, dim = -1))
             ts_loss_uda = t_loss_l + t_loss_simi1
             ######################################################################################
 
 
-
-
-
-
-
-            s_text = torch.cat((text_l, text_us))
-            s_logits, s_feature = student_model(s_text)
-            s_logits_l = s_logits[:batch_size]
+            # T_NTM = torch.eye(args.num_classes, args.num_classes).to(args.device)
+            # T_NTM.require_grad = True
+            # print(T_NTM.require_grad)
             if args.NTM == True:
-                T_NTM = anchor_T(args,s_logits_l.detach().numpy(), filter_outlier=True)
+                T_NTM = to_var(torch.eye(args.num_classes, args.num_classes))
+                meta_net = create_model(args,meta = True)
 
-            # s_logits_lf = s_logitsf[:batch_size]
-            # print("@@@@@@@@old",s_logits_l)
-            s_logits_us = s_logits[batch_size:]
-            s_feature_us =  s_feature[batch_size:]
+
+
+                def copyStateDict(state_dict):
+                    # if list(state_dict.keys())[0].startswith('module'):
+                    #     start_idx = 1
+                    # else:
+                    #     start_idx = 0
+                    new_state_dict = OrderedDict()
+                    for k, v in state_dict.items():
+                        if "ids" not in k:
+                            new_state_dict[k] = v
+                    return new_state_dict
+
+            # 加载pretrain model
+                state_dict = student_model.module.state_dict()
+                new_dict = copyStateDict(state_dict)
+                meta_net.load_state_dict(new_dict)
+                meta_net.to(args.device)
+                # for name, parm in meta_net.named_parameters():
+                #     if 'NTM' in name:
+                #         parm.requires_grad=False
+                #         break
+                # meta_optimizer = optim.SGD(filter(lambda p: p.requires_grad, meta_net.parameters()), lr=0.1)
+                meta_us_logits,_ = meta_net(text_us)
+                meta_y_hat = torch.softmax(meta_us_logits,dim = -1)
+                # pre = torch.mm(meta_y_hat,T_NTM)
+                loss_meta = criterion(torch.mm(meta_y_hat,T_NTM), hard_pseudo_label)#(pre, hard_pseudo_label)
+                loss_meta = loss_meta.requires_grad_()
+                grads = torch.autograd.grad(loss_meta, (meta_net.params()), create_graph=True,allow_unused=True)
+                meta_net.update_params(1e-3, source_params=grads)
+
+                meta_l_logits,_ = meta_net(text_l)
+                l_pre = torch.softmax(meta_l_logits,dim = -1)
+                l_g_meta = criterion(l_pre, targets)
+                grads = torch.autograd.grad(l_g_meta, T_NTM, create_graph=True)[0]
+                grads = grads / torch.max(grads)
+                T_NTM = torch.clamp(T_NTM-0.11*grads,min=0)
+
+                norm_c = torch.sum(T_NTM, 1)
+                for j in range(args.num_classes):
+                    if norm_c[j] != 0:
+                        T_NTM[j, :] /= norm_c[j]
+
+
+
+       #     new_state = meta_net.state_dict()#['NTM.weight']
+            # # grad = torch.autograd.grad(l_g_meta,T_NTM, only_inputs=True, retain_graph=True)[0]
+            # # T_NTM = torch.clamp(T_NTM - 0.11 * grad,min=0)
+            # for j in range(args.num_classes):
+            #     if norm_c[j] != 0:
+            #         T_NTM[j, :] /= norm_c[j]
+            #
+            #
+
+            if args.NTM ==True:
+                s_logits_l,_ = student_model(text_l)
+                s_logits_us,s_feature_us = student_model(text_us)
+            else:
+                s_text = torch.cat((text_l, text_us))
+                s_logits, s_feature = student_model(s_text)
+                s_logits_l = s_logits[:batch_size]
+                s_logits_us = s_logits[batch_size:]
+            # # if args.NTM == True:
+            # #     T_NTM = anchor_T(args,s_logits_l.detach().numpy(), filter_outlier=True)
+            #
+            # # s_logits_lf = s_logitsf[:batch_size]
+            # # print("@@@@@@@@old",s_logits_l)
+
             # s_logits_usf = s_logitsf[batch_size:]
             #del s_logits
             s_loss_l_old = F.cross_entropy(s_logits_l, targets)
             st_loss_l_old = s_loss_l_old.detach()
+            # st_loss_l_old = l_g_meta.detach()
 
             ######################################################################################
             #kl3
@@ -319,13 +392,14 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
 
             if args.NTM:
-                feature_balance = torch.mm(s_feature_us, T_feature)
-                feature_balance = torch.softmax(feature_balance,dim = -1)
-                # logits = torch.softmax(s_logits_us,dim = -1) + 0.3 * feature_balance
+                if args.pretrain:
+                    feature_balance = torch.mm(s_feature_us, T_feature)
+                    feature_balance = torch.softmax(feature_balance, dim=-1)
+                    s_logits_us = torch.softmax(s_logits_us,dim = -1) + 0.3 * feature_balance
 
-                s_loss = criterion(torch.mm(s_logits_us , T_NTM), hard_pseudo_label)
+                s_loss = criterion(torch.mm(torch.log_softmax(s_logits_us , dim = -1) , T_NTM), hard_pseudo_label)
 
-                    # s_loss = criterion(logits, hard_pseudo_label)
+            #         # s_loss = criterion(logits, hard_pseudo_label)
             else:
                 s_loss = criterion(s_logits_us, hard_pseudo_label)
             s_loss = s_loss_simi2 + s_loss
@@ -333,6 +407,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
             # print("      ")
             # print("````````s_loss```````", s_loss.item())
+        # print(student_model.state_dict()['module.encoder.encoder.layer.11.intermediate.dense.weight'])
         s_scaler.scale(s_loss).backward(retain_graph=True)
         # if args.grad_clip > 0:
         #     s_scaler.unscale_(s_optimizer)
@@ -340,6 +415,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
         s_scaler.step(s_optimizer)
         s_scaler.update()
         s_scheduler.step()
+
         if args.ema > 0:
             avg_student_model.update_parameters(student_model)
 
@@ -361,12 +437,14 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             # print("``````teacher`````",t_loss_mpl.item(), t_loss_l.item(), t_loss.item())
 
         t_scaler.scale(t_loss).backward(retain_graph=True)
+
         if args.grad_clip > 0:
             t_scaler.unscale_(t_optimizer)
             nn.utils.clip_grad_norm_(teacher_model.parameters(), args.grad_clip)
         t_scaler.step(t_optimizer)
         t_scaler.update()
         t_scheduler.step()
+        # print(teacher_model.state_dict()['module.encoder.encoder.layer.11.intermediate.dense.weight'])
 
         teacher_model.zero_grad()
         student_model.zero_grad()
@@ -549,91 +627,95 @@ def inference_fn(args,model, dataloader):
     confusion = metrics.confusion_matrix(labels_all, predict_all)
 
     return report, confusion,mif1,maf1,predict_all
+#
+# def finetune(args, train_loader, dev_loader, model, criterion):
+#     train_sampler = RandomSampler if args.local_rank == -1 else DistributedSampler
+#     labeled_loader = DataLoader(
+#         train_loader.dataset,
+#         sampler=train_sampler(train_loader.dataset),
+#         batch_size=args.finetune_batch_size,
+#         num_workers=args.workers,
+#         pin_memory=True)
+#     optimizer = optim.(model.parameters(),
+#                           lr=args.finetune_lr,
+#                           momentum=args.finetune_momentum,
+#                           weight_decay=args.finetune_weight_decay)
+#     scaler = amp.GradScaler(enabled=args.amp)
+#
+#     logger.info("***** Running Finetuning *****")
+#     logger.info(f"   Finetuning steps = {len(labeled_loader)*args.finetune_epochs}")
+#
+#     for epoch in range(args.finetune_epochs):
+#         if args.world_size > 1:
+#             labeled_loader.sampler.set_epoch(epoch+624)
+#
+#         batch_time = AverageMeter()
+#         data_time = AverageMeter()
+#         losses = AverageMeter()
+#         model.train()
+#         end = time.time()
+#         labeled_iter = tqdm(labeled_loader, disable=args.local_rank not in [-1, 0])
+#         for step, (text, targets) in enumerate(labeled_iter):
+#             data_time.update(time.time() - end)
+#             batch_size = text.shape[0]
+#             text = text.to(args.device)
+#             targets = targets.to(args.device)
+#             with amp.autocast(enabled=args.amp):
+#                 model.zero_grad()
+#                 outputs = model(text).to(args.device)
+#                 loss = criterion(outputs, targets)
+#
+#             scaler.scale(loss).backward(retain_graph=True)
+#             scaler.step(optimizer)
+#             scaler.update()
+#
+#             if args.world_size > 1:
+#                 loss = reduce_tensor(loss.detach(), args.world_size)
+#             losses.update(loss.item(), batch_size)
+#             batch_time.update(time.time() - end)
+#             labeled_iter.set_description(
+#                 f"Finetune Epoch: {epoch+1:2}/{args.finetune_epochs:2}. Data: {data_time.avg:.2f}s. "
+#                 f"Batch: {batch_time.avg:.2f}s. Loss: {losses.avg:.4f}. ")
+#         labeled_iter.close()
+#         if args.local_rank in [-1, 0]:
+#             args.writer.add_scalar("finetune/train_loss", losses.avg, epoch)
+#             test_loss, top1, top5 = evaluate(args, dev_loader, model, criterion)
+#             # test_loss, top1 = evaluate(args, dev_loader, model, criterion)
+#             args.writer.add_scalar("finetune/test_loss", test_loss, epoch)
+#             args.writer.add_scalar("finetune/acc@1", top1, epoch)
+#             args.writer.add_scalar("finetune/acc@5", top5, epoch)
+#             # wandb.log({"finetune/train_loss": losses.avg,
+#             #            "finetune/test_loss": test_loss,
+#             #            "finetune/acc@1": top1,
+#             #            "finetune/acc@5": top5})
+#
+#             is_best = top1 > args.best_top1
+#             if is_best:
+#                 args.best_top1 = top1
+#                 args.best_top5 = top5
+#
+#             logger.info(f"top-1 acc: {top1:.2f}")
+#             logger.info(f"Best top-1 acc: {args.best_top1:.2f}")
+#
+#             save_checkpoint(args, {
+#                 'step': step + 1,
+#                 'best_top1': args.best_top1,
+#                 'best_top5': args.best_top5,
+#                 'student_state_dict': model.state_dict(),
+#                 'avg_state_dict': None,
+#                 'student_optimizer': optimizer.state_dict(),
+#             }, is_best, finetune=True)
+#         if args.local_rank in [-1, 0]:
+#             args.writer.add_scalar("f-result/finetune_acc@1", args.best_top1)
+#             # wandb.log({"result/fintune_acc@1": args.best_top1})
+#     return
 
-def finetune(args, train_loader, dev_loader, model, criterion):
-    train_sampler = RandomSampler if args.local_rank == -1 else DistributedSampler
-    labeled_loader = DataLoader(
-        train_loader.dataset,
-        sampler=train_sampler(train_loader.dataset),
-        batch_size=args.finetune_batch_size,
-        num_workers=args.workers,
-        pin_memory=True)
-    optimizer = optim.SGD(model.parameters(),
-                          lr=args.finetune_lr,
-                          momentum=args.finetune_momentum,
-                          weight_decay=args.finetune_weight_decay)
-    scaler = amp.GradScaler(enabled=args.amp)
+def create_model(args,meta = False):
+    if meta == True:
+        model = bert.MetaModel(args)
+    else:
+        model = bert.Model(args)
 
-    logger.info("***** Running Finetuning *****")
-    logger.info(f"   Finetuning steps = {len(labeled_loader)*args.finetune_epochs}")
-
-    for epoch in range(args.finetune_epochs):
-        if args.world_size > 1:
-            labeled_loader.sampler.set_epoch(epoch+624)
-
-        batch_time = AverageMeter()
-        data_time = AverageMeter()
-        losses = AverageMeter()
-        model.train()
-        end = time.time()
-        labeled_iter = tqdm(labeled_loader, disable=args.local_rank not in [-1, 0])
-        for step, (text, targets) in enumerate(labeled_iter):
-            data_time.update(time.time() - end)
-            batch_size = text.shape[0]
-            text = text.to(args.device)
-            targets = targets.to(args.device)
-            with amp.autocast(enabled=args.amp):
-                model.zero_grad()
-                outputs = model(text).to(args.device)
-                loss = criterion(outputs, targets)
-
-            scaler.scale(loss).backward(retain_graph=True)
-            scaler.step(optimizer)
-            scaler.update()
-
-            if args.world_size > 1:
-                loss = reduce_tensor(loss.detach(), args.world_size)
-            losses.update(loss.item(), batch_size)
-            batch_time.update(time.time() - end)
-            labeled_iter.set_description(
-                f"Finetune Epoch: {epoch+1:2}/{args.finetune_epochs:2}. Data: {data_time.avg:.2f}s. "
-                f"Batch: {batch_time.avg:.2f}s. Loss: {losses.avg:.4f}. ")
-        labeled_iter.close()
-        if args.local_rank in [-1, 0]:
-            args.writer.add_scalar("finetune/train_loss", losses.avg, epoch)
-            test_loss, top1, top5 = evaluate(args, dev_loader, model, criterion)
-            # test_loss, top1 = evaluate(args, dev_loader, model, criterion)
-            args.writer.add_scalar("finetune/test_loss", test_loss, epoch)
-            args.writer.add_scalar("finetune/acc@1", top1, epoch)
-            args.writer.add_scalar("finetune/acc@5", top5, epoch)
-            # wandb.log({"finetune/train_loss": losses.avg,
-            #            "finetune/test_loss": test_loss,
-            #            "finetune/acc@1": top1,
-            #            "finetune/acc@5": top5})
-
-            is_best = top1 > args.best_top1
-            if is_best:
-                args.best_top1 = top1
-                args.best_top5 = top5
-
-            logger.info(f"top-1 acc: {top1:.2f}")
-            logger.info(f"Best top-1 acc: {args.best_top1:.2f}")
-
-            save_checkpoint(args, {
-                'step': step + 1,
-                'best_top1': args.best_top1,
-                'best_top5': args.best_top5,
-                'student_state_dict': model.state_dict(),
-                'avg_state_dict': None,
-                'student_optimizer': optimizer.state_dict(),
-            }, is_best, finetune=True)
-        if args.local_rank in [-1, 0]:
-            args.writer.add_scalar("f-result/finetune_acc@1", args.best_top1)
-            # wandb.log({"result/fintune_acc@1": args.best_top1})
-    return
-
-def create_model(args):
-    model = bert.Model(args)
     # model = BertForSequenceClassification.from_pretrained("bert-base-cased",num_labels = 4)
 
     def weights_init(m):
@@ -668,12 +750,19 @@ def main():
         args.batch_size = 4
         args.max_len = 256
         args.num_classes = 5
+        args.dropout = 0.3
         if args.num_labeled == 100:
             args.total_steps = 2000
+            args.teacher_lr = 0.0001
+            args.student_lr = 0.0001
         elif args.num_labeled == 1000:
             args.total_steps = 15000
+            args.teacher_lr = 0.0005
+            args.student_lr = 0.0005
         elif args.num_labeled == 10000:
             args.total_steps = 40000
+            args.teacher_lr = 0.0005
+            args.student_lr = 0.0005
     if args.dataset == "Yahoo":
         args.batch_size = 4
         args.max_len = 256
@@ -907,54 +996,54 @@ def main():
 
     teacher_model.zero_grad()
     student_model.zero_grad()
-    if args.pretrain == True:
-        index_num = int(len(labeled_dataset) / args.batch_size)
-        X = torch.zeros((len(labeled_dataset), args.num_classes))
-        for epoch in range(10):
-            for i, (input, target) in enumerate(labeled_loader):
-                t_optimizer.zero_grad()
-                teacher_model.train()
-                input = input.to(args.device)
-                target = target.to(args.device)
-                model_out, _ = teacher_model(input)
-                loss = criterion(model_out, target)
-                if epoch == 9:
-                    if i <= index_num:
-                        X[i*args.batch_size:(i+1)*args.batch_size, :] = F.softmax(model_out)
-                    else:
-                        X[index_num*args.batch_size, len(labeled_dataset), :] = F.softmax(model_out)
+    # if args.pretrain == True:
+    #     index_num = int(len(labeled_dataset) / args.batch_size)
+    #     X = torch.zeros((len(labeled_dataset), args.num_classes))
+    #     for epoch in range(10):
+    #         for i, (input, target) in enumerate(labeled_loader):
+    #             t_optimizer.zero_grad()
+    #             teacher_model.train()
+    #             input = input.to(args.device)
+    #             target = target.to(args.device)
+    #             model_out, _ = teacher_model(input)
+    #             loss = criterion(model_out, target)
+    #             if epoch == 9:
+    #                 if i <= index_num:
+    #                     X[i*args.batch_size:(i+1)*args.batch_size, :] = F.softmax(model_out)
+    #                 else:
+    #                     X[index_num*args.batch_size, len(labeled_dataset), :] = F.softmax(model_out)
+    #
+    #             loss.backward()
+    #             t_optimizer.step()
+    #
+    #     T_NTM = anchor_T(args,X.detach().numpy(), filter_outlier=True)
+    #     # T_NTM = torch.zeros(args.num_classes, args.num_classes).to(args.device)
+    #     # class_num = [0] * args.num_classes
+    #     # with torch.no_grad():
+    #     #     for i, (input, target) in enumerate(labeled_loader):
+    #     #         # teacher_model.train()
+    #     #         input = input.to(args.device)
+    #     #         target = target.to(args.device)
+    #     #         model_out,_ = teacher_model(input)
+    #     #         max_probs, noisy_labels = torch.max(model_out, dim=-1)
+    #     #         for real_label, noisy_label, prob in zip(target,noisy_labels,  max_probs):
+    #     #             T_NTM[real_label][noisy_label] += prob
+    #     #             class_num[real_label] += 1
+    #     #     for i in range(args.num_classes):
+    #     #             if class_num[i] == 0:
+    #     #                 continue
+    #     #             T_NTM[i, :] /= class_num[i]
+    #     #     T_NTM = F.softmax(torch.log(T_NTM),dim = -1)
+    #
 
-                loss.backward()
-                t_optimizer.step()
-
-        T_NTM = anchor_T(args,X.detach().numpy(), filter_outlier=True)
-        # T_NTM = torch.zeros(args.num_classes, args.num_classes).to(args.device)
-        # class_num = [0] * args.num_classes
-        # with torch.no_grad():
-        #     for i, (input, target) in enumerate(labeled_loader):
-        #         # teacher_model.train()
-        #         input = input.to(args.device)
-        #         target = target.to(args.device)
-        #         model_out,_ = teacher_model(input)
-        #         max_probs, noisy_labels = torch.max(model_out, dim=-1)
-        #         for real_label, noisy_label, prob in zip(target,noisy_labels,  max_probs):
-        #             T_NTM[real_label][noisy_label] += prob
-        #             class_num[real_label] += 1
-        #     for i in range(args.num_classes):
-        #             if class_num[i] == 0:
-        #                 continue
-        #             T_NTM[i, :] /= class_num[i]
-        #     T_NTM = F.softmax(torch.log(T_NTM),dim = -1)
 
 
-
-
-    T_feature = torch.zeros(768, args.num_classes).to(args.device)
-    if args.pretrain == False:
-        T_NTM = torch.zeros(args.num_classes,args.num_classes).to(args.device)
+    # T_feature = torch.zeros(768, args.num_classes).to(args.device)
+    # if args.pretrain == False:
+    #     T_NTM = torch.zeros(args.num_classes,args.num_classes).to(args.device)
     train_loop(args, labeled_loader, unlabeled_loader, dev_loader, test_loader,
                teacher_model, student_model, avg_student_model, criterion,
-               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler,T_feature,T_NTM)
+               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler)
     report, confusion, mif1, maf1,_ = inference_fn(args, student_model, test_loader)
     print("@@@@@@@@@@@@@@@@1",report, confusion, mif1, maf1)
 
