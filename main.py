@@ -43,10 +43,10 @@ import warnings
 warnings.filterwarnings('ignore')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='Yelp-newNTM-100-resume',type=str,help='experiment name')
+parser.add_argument('--name', default='Yelp100-20000-NTM',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
 parser.add_argument('--save-path', default='./f-checkpoint', type=str, help='save path')
-parser.add_argument('--dataset', default='Yelp', type=str,
+parser.add_argument('--dataset', default='AGNews', type=str,
                     choices=['base'], help='dataset name')
 parser.add_argument('--num_labeled', type=int, default=100, help='number of labeled data')
 parser.add_argument('--num_unlabeled', type=int, default=20000, help='number of unlabeled data')
@@ -61,8 +61,8 @@ parser.add_argument('--resize', default=32, type=int, help='resize image')
 parser.add_argument('--batch-size', default=4, type=int, help='train batch size')
 parser.add_argument('--teacher-dropout', default=0, type=float, help='dropout on last dense layer')
 parser.add_argument('--student-dropout', default=0, type=float, help='dropout on last dense layer')
-parser.add_argument('--teacher_lr', default=0.0005, type=float, help='train learning late')
-parser.add_argument('--student_lr', default=0.0005, type=float, help='train learning late')
+parser.add_argument('--teacher_lr', default=0.0001, type=float, help='train learning late')
+parser.add_argument('--student_lr', default=0.0001, type=float, help='train learning late')
 parser.add_argument('--momentum', default=0.9, type=float, help='SGD Momentum')
 parser.add_argument('--nesterov', action='store_true', help='use nesterov')
 parser.add_argument('--weight-decay', default= 0, type=float, help='train weight decay')
@@ -83,7 +83,7 @@ parser.add_argument('--seed', default=2333, type=int, help='seed for initializin
 parser.add_argument('--label-smoothing', default=0, type=float, help='label smoothing alpha')
 parser.add_argument('--mu', default=7, type=int, help='coefficient of unlabeled batch size')
 parser.add_argument('--threshold', default=0.95, type=float, help='pseudo label threshold')
-parser.add_argument('--temperature', default=0.5, type=float, help='pseudo label temperature')
+parser.add_argument('--temperature', default=0.1, type=float, help='pseudo label temperature')
 parser.add_argument('--lambda-u', default=1, type=float, help='coefficient of unlabeled loss')
 parser.add_argument('--uda-steps', default=1, type=float, help='warmup steps of lambda-u')
 parser.add_argument("--randaug", nargs="+", type=int, help="use it like this. --randaug 2 10")
@@ -98,6 +98,7 @@ parser.add_argument('--mode', default='train',type=str,help='mode name')
 parser.add_argument("--gpu_ids", type=list, default= [0,1,2,3], help="gpu-ids")
 parser.add_argument('--drop', default=0.7, type=float, help='SGD Momentum')
 parser.add_argument('--pretrain', default=False, action='store_true', help='only evaluate model on validation set')
+parser.add_argument('--T_Feature', default=False, action='store_true', help='only evaluate model on validation set')
 parser.add_argument('--NTM', default=True, type=float, help='NTM')
 parser.add_argument("--gpu", type=str, default= '0,1,2,3',help="gpu")
 parser.add_argument('--alpha', default=0.6, type=float, help='feature')
@@ -142,7 +143,7 @@ def to_var(x, requires_grad=True):
     x = x.cuda()
     return Variable(x, requires_grad=requires_grad)
 
-def use_clean_update_T(args,s_logits,clean_features,clean_label,T_feature,T_NTM):
+def use_clean_update_T(args,clean_features,clean_label,T_feature):
     with torch.no_grad():
         class_num = [0] * args.num_classes
         T_feature_new =torch.zeros(768,args.num_classes).to(args.device)
@@ -150,16 +151,11 @@ def use_clean_update_T(args,s_logits,clean_features,clean_label,T_feature,T_NTM)
         for feature,label in zip(clean_features, clean_label):
             T_feature_new[:,label] = T_feature_new[:,label] + feature
             class_num[label] = class_num[label]  + 1
-        max_probs, noisy_labels = torch.max(s_logits, dim=-1)
-        for real_label,noisy_label, prob in zip(clean_label,noisy_labels,max_probs):
-            T_NTM[real_label][noisy_label] += prob
-
         for i in range(args.num_classes):
             if class_num[i] == 0:
                 continue
             T_feature_new[:,i] /= class_num[i]
-            # T_NTM_new[i,:] /= class_num[i]
-        return args.alpha * T_feature + (1 - args.alpha) * T_feature_new, F.softmax(T_NTM ,dim = -1) #+ (1 - args.alpha) * T_NTM_new
+        return args.alpha * T_feature + (1 - args.alpha) * T_feature_new#+ (1 - args.alpha) * T_NTM_new
 
 def anchor_T(args,X, filter_outlier=False):
     # number of classes
@@ -182,7 +178,7 @@ def anchor_T(args,X, filter_outlier=False):
 
 def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                teacher_model, student_model, avg_student_model, criterion,
-               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler):
+               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler,T_feature):
     criteria = nn.KLDivLoss()
     torch.cuda.empty_cache()
     logger.info("***** Running Training *****")
@@ -201,6 +197,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
     moving_dot_product = torch.empty(1).to(args.device)
     limit = 3.0**(0.5)  # 3 = 6 / (f_in + f_out)
     nn.init.uniform_(moving_dot_product, -limit, limit)
+    # T_feature = torch.zeros(768, args.num_classes).to(args.device)
 
     for step in range(args.start_step, args.total_steps):
         if step % args.eval_step == 0:
@@ -336,7 +333,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                 grads = torch.autograd.grad(l_g_meta, T_NTM, create_graph=True)[0]
                 grads = grads / torch.max(grads)
                 T_NTM = torch.clamp(T_NTM-0.11*grads,min=0)
-
+                # T_NTM = F.softmax(T_NTM , dim = -1)
                 norm_c = torch.sum(T_NTM, 1)
                 for j in range(args.num_classes):
                     if norm_c[j] != 0:
@@ -354,13 +351,17 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             #
 
             if args.NTM ==True:
-                s_logits_l,_ = student_model(text_l)
+                s_logits_l,clean_features = student_model(text_l)
                 s_logits_us,s_feature_us = student_model(text_us)
             else:
                 s_text = torch.cat((text_l, text_us))
                 s_logits, s_feature = student_model(s_text)
                 s_logits_l = s_logits[:batch_size]
                 s_logits_us = s_logits[batch_size:]
+                clean_features = s_feature[:batch_size]
+                s_feature_us = s_feature[batch_size:]
+            if args.T_Feature:
+                T_feature = use_clean_update_T(args, clean_features, targets, T_feature)
             # # if args.NTM == True:
             # #     T_NTM = anchor_T(args,s_logits_l.detach().numpy(), filter_outlier=True)
             #
@@ -390,14 +391,12 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             # b = soft_pseudo_label
             s_loss_simi2 = criteria(a, b)
 
-
+            if args.T_Feature:
+                feature_balance = torch.mm(s_feature_us, T_feature)
+                feature_balance = torch.softmax(feature_balance, dim=-1)
+                s_logits_us = s_logits_us + 0.3 * feature_balance
             if args.NTM:
-                if args.pretrain:
-                    feature_balance = torch.mm(s_feature_us, T_feature)
-                    feature_balance = torch.softmax(feature_balance, dim=-1)
-                    s_logits_us = torch.softmax(s_logits_us,dim = -1) + 0.3 * feature_balance
-
-                s_loss = criterion(torch.mm(torch.log_softmax(s_logits_us , dim = -1) , T_NTM), hard_pseudo_label)
+                s_loss = criterion(torch.mm(s_logits_us, T_NTM), hard_pseudo_label)
 
             #         # s_loss = criterion(logits, hard_pseudo_label)
             else:
@@ -746,11 +745,18 @@ def main():
     if args.num_labeled == 100:
         args.teacher_lr = 0.0001
         args.student_lr = 0.0001
+    if args.dataset == "AGNews":
+        args.temperature = 0.5
+        args.drop = 0.7
+        if args.num_labeled == 10000 or args.num_labeled == 1000:
+            args.teacher_lr = 0.0005
+            args.student_lr = 0.0005
     if args.dataset == "Yelp":
         args.batch_size = 4
         args.max_len = 256
         args.num_classes = 5
-        args.dropout = 0.3
+        # args.drop = 0.3
+        args.temperature = 0.1
         if args.num_labeled == 100:
             args.total_steps = 2000
             args.teacher_lr = 0.0001
@@ -996,54 +1002,62 @@ def main():
 
     teacher_model.zero_grad()
     student_model.zero_grad()
-    # if args.pretrain == True:
-    #     index_num = int(len(labeled_dataset) / args.batch_size)
-    #     X = torch.zeros((len(labeled_dataset), args.num_classes))
-    #     for epoch in range(10):
-    #         for i, (input, target) in enumerate(labeled_loader):
-    #             t_optimizer.zero_grad()
-    #             teacher_model.train()
-    #             input = input.to(args.device)
-    #             target = target.to(args.device)
-    #             model_out, _ = teacher_model(input)
-    #             loss = criterion(model_out, target)
-    #             if epoch == 9:
-    #                 if i <= index_num:
-    #                     X[i*args.batch_size:(i+1)*args.batch_size, :] = F.softmax(model_out)
-    #                 else:
-    #                     X[index_num*args.batch_size, len(labeled_dataset), :] = F.softmax(model_out)
-    #
-    #             loss.backward()
-    #             t_optimizer.step()
-    #
-    #     T_NTM = anchor_T(args,X.detach().numpy(), filter_outlier=True)
-    #     # T_NTM = torch.zeros(args.num_classes, args.num_classes).to(args.device)
-    #     # class_num = [0] * args.num_classes
-    #     # with torch.no_grad():
-    #     #     for i, (input, target) in enumerate(labeled_loader):
-    #     #         # teacher_model.train()
-    #     #         input = input.to(args.device)
-    #     #         target = target.to(args.device)
-    #     #         model_out,_ = teacher_model(input)
-    #     #         max_probs, noisy_labels = torch.max(model_out, dim=-1)
-    #     #         for real_label, noisy_label, prob in zip(target,noisy_labels,  max_probs):
-    #     #             T_NTM[real_label][noisy_label] += prob
-    #     #             class_num[real_label] += 1
-    #     #     for i in range(args.num_classes):
-    #     #             if class_num[i] == 0:
-    #     #                 continue
-    #     #             T_NTM[i, :] /= class_num[i]
-    #     #     T_NTM = F.softmax(torch.log(T_NTM),dim = -1)
-    #
+    if args.pretrain == True:
+        index_num = int(len(labeled_dataset) / args.batch_size)
+        X = torch.zeros((len(labeled_dataset), args.num_classes))
+        # for epoch in range(10):
+        #     for i, (input, target) in enumerate(labeled_loader):
+        #         t_optimizer.zero_grad()
+        #         teacher_model.train()
+        #         input = input.to(args.device)
+        #         target = target.to(args.device)
+        #         model_out, _ = teacher_model(input)
+        #         loss = criterion(model_out, target)
+        #         if epoch == 9:
+        #             if i <= index_num:
+        #                 X[i*args.batch_size:(i+1)*args.batch_size, :] = F.softmax(model_out)
+        #             else:
+        #                 X[index_num*args.batch_size, len(labeled_dataset), :] = F.softmax(model_out)
+        #
+        #         loss.backward()
+        #         t_optimizer.step()
+
+        # T_NTM = anchor_T(args,X.detach().numpy(), filter_outlier=True)
+        # T_NTM = torch.zeros(args.num_classes, args.num_classes).to(args.device)
+        class_num = [0] * args.num_classes
+        T_feature = torch.zeros(768, args.num_classes).to(args.device)
+        with torch.no_grad():
+            for i, (input, target) in enumerate(labeled_loader):
+                # teacher_model.train()
+                input = input.to(args.device)
+                target = target.to(args.device)
+                model_out,feature = teacher_model(input)
+                for feature, label in zip(feature, target):
+                    T_feature[:, label] = T_feature[:, label] + feature
+                    class_num[label] = class_num[label] + 1
+            for i in range(args.num_classes):
+                if class_num[i] == 0:
+                    continue
+                T_feature[:, i] /= class_num[i]
+
+                # for real_label, noisy_label, prob in zip(target,noisy_labels,  max_probs):
+                #     T_NTM[real_label][noisy_label] += prob
+                #     class_num[real_label] += 1
+            # for i in range(args.num_classes):
+            #         if class_num[i] == 0:
+            #             continue
+            #         T_NTM[i, :] /= class_num[i]
+            # T_NTM = F.softmax(torch.log(T_NTM),dim = -1)
+    else:
+        T_feature = torch.zeros(768, args.num_classes).to(args.device)
 
 
 
-    # T_feature = torch.zeros(768, args.num_classes).to(args.device)
     # if args.pretrain == False:
     #     T_NTM = torch.zeros(args.num_classes,args.num_classes).to(args.device)
     train_loop(args, labeled_loader, unlabeled_loader, dev_loader, test_loader,
                teacher_model, student_model, avg_student_model, criterion,
-               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler)
+               t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler,T_feature)
     report, confusion, mif1, maf1,_ = inference_fn(args, student_model, test_loader)
     print("@@@@@@@@@@@@@@@@1",report, confusion, mif1, maf1)
 
