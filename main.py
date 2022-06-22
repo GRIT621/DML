@@ -43,10 +43,10 @@ import warnings
 warnings.filterwarnings('ignore')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='Yelp100-20000-NTM',type=str,help='experiment name')
+parser.add_argument('--name', default='Yelp100-NTM-feature-origin-outNTM-noload',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
-parser.add_argument('--save-path', default='./f-checkpoint', type=str, help='save path')
-parser.add_argument('--dataset', default='AGNews', type=str,
+parser.add_argument('--save-path', default='./6.16-checkpoint', type=str, help='save path')
+parser.add_argument('--dataset', default='Yelp', type=str,
                     choices=['base'], help='dataset name')
 parser.add_argument('--num_labeled', type=int, default=100, help='number of labeled data')
 parser.add_argument('--num_unlabeled', type=int, default=20000, help='number of unlabeled data')
@@ -100,7 +100,7 @@ parser.add_argument('--drop', default=0.7, type=float, help='SGD Momentum')
 parser.add_argument('--pretrain', default=False, action='store_true', help='only evaluate model on validation set')
 parser.add_argument('--T_Feature', default=False, action='store_true', help='only evaluate model on validation set')
 parser.add_argument('--NTM', default=True, type=float, help='NTM')
-parser.add_argument("--gpu", type=str, default= '0,1,2,3',help="gpu")
+parser.add_argument("--gpu", type=str, default= '6,1,2,3',help="gpu")
 parser.add_argument('--alpha', default=0.6, type=float, help='feature')
 
 def setup_seed(seed):
@@ -113,6 +113,31 @@ def setup_seed(seed):
    torch.backends.cudnn.benchmark = False
    torch.backends.cudnn.deterministic = True
    torch.backends.cudnn.enabled = True
+
+# def calculate_score(vector_x,vector_y):
+#         num = torch.dot(vector_x,vector_y.T)
+#         denom = torch.linalg.norm(vector_x) * torch.linalg.norm(vector_y)
+#         return num / denom
+
+def normalize(x, axis=-1):
+    x = 1. * x / (torch.norm(x, 2, axis, keepdim=True).expand_as(x) + 1e-12)
+    return x
+
+
+
+def cosine_similarity(x, y):
+    # result = torch.zeros(x.size(0),y.size(-1))
+    # for i in range(len(x)):
+    #     for j in range(len(y)):
+    #         result[i][j] =calculate_score(x[i],y[j])
+    # return result
+    x,y = normalize(x),normalize(y)
+    cos = torch.mm(x,y.permute(1,0))
+    return cos
+def attention_socre(x,y):
+    attention_scores = torch.matmul(x,y)
+    return torch.mul(attention_scores , 1.0 / math.sqrt(float(768)))
+
 
 
 
@@ -310,9 +335,9 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                     return new_state_dict
 
             # 加载pretrain model
-                state_dict = student_model.module.state_dict()
-                new_dict = copyStateDict(state_dict)
-                meta_net.load_state_dict(new_dict)
+            #     state_dict = student_model.module.state_dict()
+            #     new_dict = copyStateDict(state_dict)
+            #     meta_net.load_state_dict(new_dict)
                 meta_net.to(args.device)
                 # for name, parm in meta_net.named_parameters():
                 #     if 'NTM' in name:
@@ -323,7 +348,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                 meta_y_hat = torch.softmax(meta_us_logits,dim = -1)
                 # pre = torch.mm(meta_y_hat,T_NTM)
                 loss_meta = criterion(torch.mm(meta_y_hat,T_NTM), hard_pseudo_label)#(pre, hard_pseudo_label)
-                loss_meta = loss_meta.requires_grad_()
+                # loss_meta = loss_meta.requires_grad_()
                 grads = torch.autograd.grad(loss_meta, (meta_net.params()), create_graph=True,allow_unused=True)
                 meta_net.update_params(1e-3, source_params=grads)
 
@@ -332,8 +357,8 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                 l_g_meta = criterion(l_pre, targets)
                 grads = torch.autograd.grad(l_g_meta, T_NTM, create_graph=True)[0]
                 grads = grads / torch.max(grads)
-                T_NTM = torch.clamp(T_NTM-0.11*grads,min=0)
-                # T_NTM = F.softmax(T_NTM , dim = -1)
+                T_NTM = torch.clamp(T_NTM -  0.11 * grads,min=0)
+                # T_NTM = F.softmax(T_NTM)
                 norm_c = torch.sum(T_NTM, 1)
                 for j in range(args.num_classes):
                     if norm_c[j] != 0:
@@ -389,19 +414,32 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             a= torch.log_softmax(s_logits_us , dim = -1)
             b = torch.softmax(t_logits_us, dim = -1)
             # b = soft_pseudo_label
-            s_loss_simi2 = criteria(a, b)
+            s_loss = criteria(a, b)
 
             if args.T_Feature:
-                feature_balance = torch.mm(s_feature_us, T_feature)
-                feature_balance = torch.softmax(feature_balance, dim=-1)
-                s_logits_us = s_logits_us + 0.3 * feature_balance
+                # print(type(s_feature_us),type(T_feature))
+                feature_score =cosine_similarity(s_feature_us, T_feature.T).to(args.device)
+                # feature_score = attention_socre(s_feature_us,T_feature)
+                # s_loss += criterion(feature_score,hard_pseudo_label)
             if args.NTM:
-                s_loss = criterion(torch.mm(s_logits_us, T_NTM), hard_pseudo_label)
+                if args.T_Feature:
+                    s_loss += criterion(torch.mm(s_logits_us+ 0.3 * feature_score , T_NTM)  , hard_pseudo_label)
+                else:
+                    # _,index = torch.max(s_logits_us, dim = -1)
+                    # s_logits_us_new = torch.zeros_like(s_logits_us)
+                    # for i in range(len(index)):
+                    #     if index[i] != hard_pseudo_label[i]:
+                    #         s_logits_us_new[i] = torch.matmul(s_logits_us[i], T_NTM)
+                    #     else:
+                    #         s_logits_us_new[i] = s_logits_us[i]
+                    # s_loss += criterion(s_logits_us_new, hard_pseudo_label)
+
+                    s_loss += criterion(torch.mm(s_logits_us, T_NTM), hard_pseudo_label)
 
             #         # s_loss = criterion(logits, hard_pseudo_label)
             else:
-                s_loss = criterion(s_logits_us, hard_pseudo_label)
-            s_loss = s_loss_simi2 + s_loss
+                s_loss += criterion(s_logits_us, hard_pseudo_label)
+            # s_loss = s_loss_simi2 + s_loss
             ######################################################################################
 
             # print("      ")
@@ -532,7 +570,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                 report, confusion, mif1, maf1, predict_all=inference_fn(args,student_model, labeled_loader)
                 print(report,mif1)
     if args.local_rank in [-1, 0]:
-        args.writer.add_scalar("f-result/test_acc@1", args.best_top1)
+        args.writer.add_scalar("6.16-result/test_acc@1", args.best_top1)
         # wandb.log({"result/test_acc@1": args.best_top1})
     # finetune
     # del t_scaler, t_scheduler, t_optimizer, teacher_model, unlabeled_loader
@@ -755,7 +793,7 @@ def main():
         args.batch_size = 4
         args.max_len = 256
         args.num_classes = 5
-        # args.drop = 0.3
+
         args.temperature = 0.1
         if args.num_labeled == 100:
             args.total_steps = 2000
@@ -815,7 +853,7 @@ def main():
     logger.info(dict(args._get_kwargs()))
 
     if args.local_rank in [-1, 0]:
-        args.writer = SummaryWriter(f"f-result/{args.name}")
+        args.writer = SummaryWriter(f"6.16-result/{args.name}")
         # wandb.init(name=args.name, project='MPL', config=args)
 
     if args.seed is not None:
@@ -1055,6 +1093,7 @@ def main():
 
     # if args.pretrain == False:
     #     T_NTM = torch.zeros(args.num_classes,args.num_classes).to(args.device)
+
     train_loop(args, labeled_loader, unlabeled_loader, dev_loader, test_loader,
                teacher_model, student_model, avg_student_model, criterion,
                t_optimizer, s_optimizer, t_scheduler, s_scheduler, t_scaler, s_scaler,T_feature)
