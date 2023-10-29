@@ -12,6 +12,7 @@ import pandas as pd
 from transformers import AutoTokenizer, AutoModel, AutoConfig, BertTokenizer, BertModel, BertConfig, BertForSequenceClassification
 from sklearn.model_selection import KFold, train_test_split
 import os
+import csv
 # from torchtext.data.utils import get_tokenizer
 
 
@@ -297,12 +298,12 @@ def get_AGNews(args):
 
 
 
-    data = pd.read_csv('./dataset/AG_NEWS/train.csv',names = ["label","title","text"])
-    test_data = pd.read_csv('./dataset/AG_NEWS/test.csv',names = ["label","title","text"])
+    data = pd.read_csv('/home/lsj0920/MPL/dataset/AG_NEWS/train.csv',names = ["label","title","text"])
+    test_data = pd.read_csv('/home/lsj0920/MPL/dataset/AG_NEWS/test.csv',names = ["label","title","text"])
     test_data['train_id'] = test_data['title'] + " " + test_data["text"]
     test_data['train_id'] = test_data['train_id'].apply(tokenizen)
     def modifylabel(row):
-        return row - 1
+        return int(row) - 1
     test_data["label"] = test_data["label"].apply(modifylabel)
     testdata, testlabel = torch.tensor(test_data['train_id'] , dtype=torch.long), torch.tensor(test_data['label'] , dtype=torch.long)
     test_dataset = Base_dataset(args, model=args.model, mode="test",
@@ -355,8 +356,8 @@ def get_Yelp(args):
 
 
 
-    data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/Yelp/train.csv',names = ["label","text"])
-    dev_data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/Yelp/test.csv',names = ["label","text"])
+    data = pd.read_csv('/home/lsj0920/MPL/dataset/Yelp/yelp_review_full_csv/train.csv',names = ["label","text"])
+    test_data = pd.read_csv('/home/lsj0920/MPL/dataset/Yelp/yelp_review_full_csv/test.csv',names = ["label","text"])
     #136参数来源
     if args.num_labeled == 100:
         data2 = data.sample(frac= 0.04, random_state=args.seed)
@@ -380,14 +381,14 @@ def get_Yelp(args):
     def modifylabel(row):
         return row - 1
 
-    dev_data['train_id'] = dev_data['text'].apply(tokenizen)
-    dev_data["label"] = dev_data["label"].apply(modifylabel)
-    devdata, devlabel = torch.tensor(dev_data['train_id'] , dtype=torch.long), torch.tensor(dev_data['label'] , dtype=torch.long)
-    dev_dataset = Base_dataset(args, model=args.model, mode="test",
+    test_data['train_id'] = test_data['text'].apply(tokenizen)
+    test_data["label"] = test_data["label"].apply(modifylabel)
+    devdata, devlabel = torch.tensor(test_data['train_id'] , dtype=torch.long), torch.tensor(dev_data['label'] , dtype=torch.long)
+    test_dataset = Base_dataset(args, model=args.model, mode="test",
                                 train_data=devdata, test_data=devdata, train_label=devlabel,
                                 test_label=devlabel)
     if args.evaluate == True:
-        return dev_dataset
+        return test_dataset
 
     data2['train_id'] = data2['text'].apply(tokenizen)
     data2["label"] = data2["label"].apply(modifylabel)
@@ -405,11 +406,11 @@ def get_Yelp(args):
                                                   train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
     train_unlabeled_dataset =Base_dataset(args,model =args.model, mode="unlabeled",
                                                    train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
-    test_dataset =Base_dataset(args,model = args.model,mode="test",
-                                        train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
+    # dev_dataset =Base_dataset(args,model = args.model,mode="test",
+    #                                     train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
 
 
-    return train_labeled_dataset, train_unlabeled_dataset, test_dataset,dev_dataset
+    return train_labeled_dataset, train_unlabeled_dataset, test_dataset,test_dataset
 def get_Yahoo(args):
     pretrained_weights = 'bert-base-cased'
 
