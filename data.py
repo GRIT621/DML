@@ -56,6 +56,8 @@ class Base_dataset(Dataset):
             args.num_classes = 14
         elif self.dataset == 'AGNews':
             args.num_classes = 4
+        elif self.dataset == 'Yahoo':
+            args.num_classes = 10
         if self.mode == "dev":
             self.test_data = test_data
             self.test_label = test_label
@@ -92,6 +94,22 @@ class Base_dataset(Dataset):
                 self.train_label_u = train_label[args.num_labeled:]
                 self.test_data = test_data
                 self.test_label = test_label
+                if args.noise_rate:
+                    self.train_label_l = train_label[:args.num_labeled]
+
+                    print(len(self.train_label_l), args.noise_rate)
+                    random_indices = random.sample(range(len(self.train_label_l)), int(len(self.train_label_l) * args.noise_rate))
+                    self.clean_inex = list(set(list(range(len(self.train_label_l)))) - set(random_indices))
+                    logger.info(f"select_s vesampel_index:{random_indices}")
+                    logger.info(f"select_sampel:{self.train_label_l[random_indices]}")
+                    for i in random_indices:
+                        self.train_label_l[i] = random.randint(0,args.num_classes - 1)
+                    logger.info(f"change_sampel:{self.train_label_l[random_indices]}")
+                    self.text_noise, self.label_noise = self.train_data_l[random_indices], self.train_label_l[random_indices]
+                    self.text_clean, self.label_clean = self.train_data_l[self.clean_inex], self.train_label_l[self.clean_inex]
+
+
+
             elif self.model == "TextRCNN":
                 self.train_data_l = train_data[:n//2][0]
                 self.train_data_u = train_data[n//2:][0]
@@ -107,23 +125,27 @@ class Base_dataset(Dataset):
 
         if self.mode == 'labeled':
             text, target = self.train_data_l[index], self.train_label_l[index]
-
             text1 = torch.tensor(text)
             return text1, target
         elif self.mode == 'unlabeled':
             text, target = self.train_data_u[index], self.train_label_u[index]
             text1 = torch.tensor(text)
             text2 = torch.tensor(text)
-
-            return text1, text2, target
+            return text1, text2, target,index
         elif self.mode == 'test' or self.mode == "dev":
             text, target = self.test_data[index], self.test_label[index]
             text1 = torch.tensor(text)
             return text1, target
+        elif self.mode =="noise":
+            text_noise, label_noise = self.text_noise[index // len(self.text_noise)], self.label_noise[index // len(self.text_noise)]
+            text_clean, label_clean = self.text_clean[index], self.label_clean[index]
+            return torch.tensor(text_noise), torch.tensor(label_noise), torch.tensor(text_clean), torch.tensor(label_clean)
 
     def __len__(self):
         if self.mode == 'labeled':
             return len(self.train_data_l)
+        elif self.mode == 'noise':
+            return len(self.label_clean)
         elif self.mode == 'unlabeled':
             return len(self.train_data_u)
         else:
@@ -326,8 +348,11 @@ def get_AGNews(args):
                                                                               data2['label'].values, test_size=int(0.8 * args.num_labeled),train_size=args.num_labeled+args.num_unlabeled,
                                                                               random_state=2333)
 
-
-    train_labeled_dataset = Base_dataset(args,model =args.model, mode="labeled",
+    if args.noise_rate:
+        train_labeled_dataset = Base_dataset(args,model =args.model, mode="noise",
+                                                  train_data=train_data,test_data=dev_data, train_label=train_label, test_label=dev_label)
+    else:
+        train_labeled_dataset = Base_dataset(args,model =args.model, mode="labeled",
                                                   train_data=train_data,test_data=dev_data, train_label=train_label, test_label=dev_label)
     train_unlabeled_dataset =Base_dataset(args,model =args.model, mode="unlabeled",
                                                    train_data=train_data,test_data=dev_data, train_label=train_label, test_label=dev_label)
@@ -335,7 +360,8 @@ def get_AGNews(args):
                                         train_data=train_data,test_data=dev_data, train_label=train_label, test_label=dev_label)
 
 
-    return train_labeled_dataset, train_unlabeled_dataset, dev_dataset,test_dataset
+
+    return train_labeled_dataset, train_unlabeled_dataset, test_dataset,test_dataset
 
 
 def get_Yelp(args):
@@ -383,7 +409,7 @@ def get_Yelp(args):
 
     test_data['train_id'] = test_data['text'].apply(tokenizen)
     test_data["label"] = test_data["label"].apply(modifylabel)
-    devdata, devlabel = torch.tensor(test_data['train_id'] , dtype=torch.long), torch.tensor(dev_data['label'] , dtype=torch.long)
+    devdata, devlabel = torch.tensor(test_data['train_id'] , dtype=torch.long), torch.tensor(test_data['label'] , dtype=torch.long)
     test_dataset = Base_dataset(args, model=args.model, mode="test",
                                 train_data=devdata, test_data=devdata, train_label=devlabel,
                                 test_label=devlabel)
@@ -401,8 +427,12 @@ def get_Yelp(args):
 
     #
     # # (self, dataset, args, model, mode, train_data, train_label, test_data, test_label):
-
-    train_labeled_dataset = Base_dataset(args,model =args.model, mode="labeled",
+    if args.noise_rate:
+        train_labeled_dataset = Base_dataset(args, model=args.model, mode="noise",
+                                             train_data=train_data, test_data=test_data, train_label=train_label,
+                                             test_label=test_label)
+    else:
+        train_labeled_dataset = Base_dataset(args,model =args.model, mode="labeled",
                                                   train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
     train_unlabeled_dataset =Base_dataset(args,model =args.model, mode="unlabeled",
                                                    train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
@@ -429,8 +459,8 @@ def get_Yahoo(args):
 
 
 
-    data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/Yahoo/train.csv',names = ["no","label","text"])
-    dev_data = pd.read_csv('/home/lsj0920/mpl-pytorch-main-yelp/dataset/Yahoo/test.csv',names = ["no","label","text"])
+    data = pd.read_csv('/home/lsj0920/MPL/dataset/Yahoo/train.csv',names = ["no","label","text"])
+    dev_data = pd.read_csv('/home/lsj0920/MPL/dataset/Yahoo/test.csv',names = ["no","label","text"])
     #136参数来源
     if args.num_labeled == 100:
         data2 = data.sample(frac= 0.04, random_state=args.seed)
@@ -468,6 +498,7 @@ def get_Yahoo(args):
 
 
 
+
     train_data, test_data, train_label, test_label = train_test_split(data2['train_id'].values,
                                                                               data2['label'].values, test_size=int(0.8 * args.num_labeled),train_size=args.num_labeled+args.num_unlabeled,
                                                                               random_state=args.seed)
@@ -479,11 +510,11 @@ def get_Yahoo(args):
                                                   train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
     train_unlabeled_dataset =Base_dataset(args,model =args.model, mode="unlabeled",
                                                    train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
-    test_dataset =Base_dataset(args,model = args.model,mode="test",
+    test_dataset = Base_dataset(args,model = args.model,mode="test",
                                         train_data=train_data,test_data=test_data, train_label=train_label, test_label=test_label)
 
 
-    return train_labeled_dataset, train_unlabeled_dataset, test_dataset,dev_dataset
+    return train_labeled_dataset, train_unlabeled_dataset, dev_dataset,dev_dataset
 
 DATASET_GETTERS = {'base':get_base,
                    'tianchi':get_tianchi,
