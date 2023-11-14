@@ -43,26 +43,27 @@ import warnings
 warnings.filterwarnings('ignore')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='Yelp100-NTM-feature-origin-outNTM-noload',type=str,help='experiment name')
+parser.add_argument('--name', default='test',type=str,help='experiment name')
 parser.add_argument('--data-path', default='./data', type=str, help='data path')
-parser.add_argument('--save-path', default='./6.16-checkpoint', type=str, help='save path')
-parser.add_argument('--dataset', default='Yelp', type=str,
-                    choices=['base'], help='dataset name')
+parser.add_argument('--save-path', default='./11.9-checkpoint', type=str, help='save path')
+parser.add_argument('--dataset', default='AGNews', type=str,
+                    choices=['AGNews','Yahoo','Yelp'], help='dataset name')
 parser.add_argument('--num_labeled', type=int, default=100, help='number of labeled data')
-parser.add_argument('--num_unlabeled', type=int, default=20000, help='number of unlabeled data')
+parser.add_argument('--num_unlabeled', type=int, default=200, help='number of unlabeled data')
 parser.add_argument("--expand-labels", action="store_true", help="expand labels to fit eval steps")
-parser.add_argument('--total-steps', default=30000, type=int, help='number of total steps to run')
+parser.add_argument('--total-steps', default=2000, type=int, help='number of total steps to run')
 parser.add_argument('--eval-step', default=100, type=int, help='number of eval steps to run')
 parser.add_argument('--start-step', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--workers', default=4, type=int, help='number of workers')
-parser.add_argument('--num_classes', default=100, type=int, help='number of classes')
+parser.add_argument('--num_classes', default=5, type=int, help='number of classes')
 parser.add_argument('--resize', default=32, type=int, help='resize image')
-parser.add_argument('--batch-size', default=4, type=int, help='train batch size')
+parser.add_argument('--label-batch-size', default=16, type=int, help='train batch size')
+parser.add_argument('--unlabel-batch-size', default=1, type=int, help='train batch size')
 parser.add_argument('--teacher-dropout', default=0, type=float, help='dropout on last dense layer')
 parser.add_argument('--student-dropout', default=0, type=float, help='dropout on last dense layer')
-parser.add_argument('--teacher_lr', default=0.0001, type=float, help='train learning late')
-parser.add_argument('--student_lr', default=0.0001, type=float, help='train learning late')
+parser.add_argument('--teacher_lr', default=0.00001, type=float, help='train learning late')
+parser.add_argument('--student_lr', default=0.00001, type=float, help='train learning late')
 parser.add_argument('--momentum', default=0.9, type=float, help='SGD Momentum')
 parser.add_argument('--nesterov', action='store_true', help='use nesterov')
 parser.add_argument('--weight-decay', default= 0, type=float, help='train weight decay')
@@ -82,7 +83,7 @@ parser.add_argument('--finetune-momentum', default=0, type=float, help='finetune
 parser.add_argument('--seed', default=2333, type=int, help='seed for initializing training')
 parser.add_argument('--label-smoothing', default=0, type=float, help='label smoothing alpha')
 parser.add_argument('--mu', default=7, type=int, help='coefficient of unlabeled batch size')
-parser.add_argument('--threshold', default=0.95, type=float, help='pseudo label threshold')
+parser.add_argument('--threshold', default=0, type=float, help='pseudo label threshold')
 parser.add_argument('--temperature', default=0.1, type=float, help='pseudo label temperature')
 parser.add_argument('--lambda-u', default=1, type=float, help='coefficient of unlabeled loss')
 parser.add_argument('--uda-steps', default=1, type=float, help='warmup steps of lambda-u')
@@ -92,16 +93,18 @@ parser.add_argument('--world-size', default= -1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument("--local_rank", type=int, default= -1,
                     help="For distributed training: clocal_rank")
-parser.add_argument('--max_len', default=256, type=int, help='text_len')
+parser.add_argument('--max_len', default=512, type=int, help='text_len')
 parser.add_argument('--model', default='bert',type=str,help='model name')
 parser.add_argument('--mode', default='train',type=str,help='mode name')
-parser.add_argument("--gpu_ids", type=list, default= [0,1,2,3], help="gpu-ids")
+parser.add_argument("--gpu_ids", type=list, default= [0], help="gpu-ids")
 parser.add_argument('--drop', default=0.7, type=float, help='SGD Momentum')
 parser.add_argument('--pretrain', default=False, action='store_true', help='only evaluate model on validation set')
 parser.add_argument('--T_Feature', default=False, action='store_true', help='only evaluate model on validation set')
-parser.add_argument('--NTM', default=True, type=float, help='NTM')
-parser.add_argument("--gpu", type=str, default= '6,1,2,3',help="gpu")
+parser.add_argument('--NTM', type=int, default=1, help='NTM')
+parser.add_argument("--gpu", type=str, default= '3',help="gpu")
 parser.add_argument('--alpha', default=0.6, type=float, help='feature')
+parser.add_argument('--noise_rate', default=0.1, type=float, help='feature')
+# parser.add_argument('--epoch_pesudo', default=0, type=float, help='feature')
 
 def setup_seed(seed):
    torch.manual_seed(seed)
@@ -209,10 +212,10 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
     logger.info("***** Running Training *****")
     logger.info(f"   Task = {args.dataset}@{args.num_labeled}")
     logger.info(f"   Total steps = {args.total_steps}")
-
+    labeled_epoch = 0
+    unlabeled_epoch = 0
     if args.world_size > 1:
-        labeled_epoch = 0
-        unlabeled_epoch = 0
+
         labeled_loader.sampler.set_epoch(labeled_epoch)
         unlabeled_loader.sampler.set_epoch(unlabeled_epoch)
 
@@ -222,7 +225,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
     moving_dot_product = torch.empty(1).to(args.device)
     limit = 3.0**(0.5)  # 3 = 6 / (f_in + f_out)
     nn.init.uniform_(moving_dot_product, -limit, limit)
-    # T_feature = torch.zeros(768, args.num_classes).to(args.device)
+
 
     for step in range(args.start_step, args.total_steps):
         if step % args.eval_step == 0:
@@ -253,14 +256,15 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             text_l, targets = labeled_iter.next()
 
         try:
-            text_uw, text_us, _ = unlabeled_iter.next()
+            text_uw, text_us, _ ,udx = unlabeled_iter.next()
 
         except:
+            unlabeled_epoch = unlabeled_epoch + 1
+            # ema_pslab, epoch_pslab = update_ema_predictions(unlabeled_epoch, ema_pslab, epoch_pslab)
             if args.world_size > 1:
-                unlabeled_epoch = unlabeled_epoch+1
                 unlabeled_loader.sampler.set_epoch(unlabeled_epoch)
             unlabeled_iter = iter(unlabeled_loader)
-            text_uw, text_us, _ = unlabeled_iter.next()
+            text_uw, text_us, _, udx = unlabeled_iter.next()
 
         data_time.update(time.time() - end)
 
@@ -277,6 +281,14 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             t_logits_l = t_logits[:batch_size]
             t_logits_uw, t_logits_us = t_logits[batch_size:].chunk(2)
 
+            # iter_unlab_pslab = epoch_pslab[idxs]
+            # tmp_loss  = mse_loss(outputs, iter_unlab_pslab)
+            # tmp_loss *= self.rampup(self.epoch)*self.usp_weight
+            # loss  += tmp_loss; loop_info['aTmp'].append(tmp_loss.item())
+            # ## update pseudo labels
+            # with torch.no_grad():
+            #     self.epoch_pslab[idxs] = outputs.clone().detach()
+
             # t_logits_lf = t_logitsf[:batch_size]
             # t_logits_uwf, t_logits_usf = t_logitsf[batch_size:].chunk(2)
 
@@ -284,9 +296,15 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
             t_loss_l = criterion(t_logits_l, targets)
 
-
             soft_pseudo_label = torch.softmax(t_logits_uw.detach()/args.temperature, dim=-1)
+            # if args.epoch_pesudo and unlabeled_epoch >= 1:
+            #     soft_pseudo_label = epoch_pslab[udx]
+            #     with torch.no_grad():
+            #         epoch_pslab[udx] = t_logits_uw.clone().detach()
+
             max_probs, hard_pseudo_label = torch.max(soft_pseudo_label, dim=-1)
+
+
             ######################################################################################
             # kl3
             # t_loss_simi3 = criteria(torch.log_softmax(t_logits_usf,dim = -1) , torch.softmax(t_logits_lf , dim = -1))
@@ -299,7 +317,7 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
 
             ######################################################################################
             #org
-            # mask = max_probs.ge(args.threshold).float()
+            mask = max_probs.ge(args.threshold).float()
             # t_loss_u = torch.mean(
             #     -(soft_pseudo_label * torch.log_softmax(t_logits_us, dim=-1)).sum(dim=-1) * mask
             # )
@@ -314,20 +332,13 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
             ######################################################################################
 
 
-            # T_NTM = torch.eye(args.num_classes, args.num_classes).to(args.device)
-            # T_NTM.require_grad = True
-            # print(T_NTM.require_grad)
-            if args.NTM == True:
+            if args.NTM:
                 T_NTM = to_var(torch.eye(args.num_classes, args.num_classes))
                 meta_net = create_model(args,meta = True)
 
 
 
                 def copyStateDict(state_dict):
-                    # if list(state_dict.keys())[0].startswith('module'):
-                    #     start_idx = 1
-                    # else:
-                    #     start_idx = 0
                     new_state_dict = OrderedDict()
                     for k, v in state_dict.items():
                         if "ids" not in k:
@@ -335,27 +346,24 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                     return new_state_dict
 
             # 加载pretrain model
-            #     state_dict = student_model.module.state_dict()
-            #     new_dict = copyStateDict(state_dict)
-            #     meta_net.load_state_dict(new_dict)
+                state_dict = student_model.module.state_dict()
+                new_dict = copyStateDict(state_dict)
+                meta_net.load_state_dict(new_dict)
                 meta_net.to(args.device)
-                # for name, parm in meta_net.named_parameters():
-                #     if 'NTM' in name:
-                #         parm.requires_grad=False
-                #         break
-                # meta_optimizer = optim.SGD(filter(lambda p: p.requires_grad, meta_net.parameters()), lr=0.1)
+
                 meta_us_logits,_ = meta_net(text_us)
                 meta_y_hat = torch.softmax(meta_us_logits,dim = -1)
-                # pre = torch.mm(meta_y_hat,T_NTM)
                 loss_meta = criterion(torch.mm(meta_y_hat,T_NTM), hard_pseudo_label)#(pre, hard_pseudo_label)
-                # loss_meta = loss_meta.requires_grad_()
+
+                meta_net.meta_zero_grad()
+
                 grads = torch.autograd.grad(loss_meta, (meta_net.params()), create_graph=True,allow_unused=True)
                 meta_net.update_params(1e-3, source_params=grads)
 
                 meta_l_logits,_ = meta_net(text_l)
                 l_pre = torch.softmax(meta_l_logits,dim = -1)
                 l_g_meta = criterion(l_pre, targets)
-                grads = torch.autograd.grad(l_g_meta, T_NTM, create_graph=True)[0]
+                grads = torch.autograd.grad(l_g_meta, T_NTM, retain_graph=True)[0]
                 grads = grads / torch.max(grads)
                 T_NTM = torch.clamp(T_NTM -  0.11 * grads,min=0)
                 # T_NTM = F.softmax(T_NTM)
@@ -364,20 +372,9 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                     if norm_c[j] != 0:
                         T_NTM[j, :] /= norm_c[j]
 
-
-
-       #     new_state = meta_net.state_dict()#['NTM.weight']
-            # # grad = torch.autograd.grad(l_g_meta,T_NTM, only_inputs=True, retain_graph=True)[0]
-            # # T_NTM = torch.clamp(T_NTM - 0.11 * grad,min=0)
-            # for j in range(args.num_classes):
-            #     if norm_c[j] != 0:
-            #         T_NTM[j, :] /= norm_c[j]
-            #
-            #
-
-            if args.NTM ==True:
-                s_logits_l,clean_features = student_model(text_l)
-                s_logits_us,s_feature_us = student_model(text_us)
+            if args.NTM:
+                s_logits_l, clean_features = student_model(text_l)
+                s_logits_us, s_feature_us = student_model(text_us)
             else:
                 s_text = torch.cat((text_l, text_us))
                 s_logits, s_feature = student_model(s_text)
@@ -433,12 +430,12 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                     #     else:
                     #         s_logits_us_new[i] = s_logits_us[i]
                     # s_loss += criterion(s_logits_us_new, hard_pseudo_label)
-
                     s_loss += criterion(torch.mm(s_logits_us, T_NTM), hard_pseudo_label)
 
             #         # s_loss = criterion(logits, hard_pseudo_label)
             else:
-                s_loss += criterion(s_logits_us, hard_pseudo_label)
+                # (F.cross_entropy(predictions, hard_pseudo_label, reduction='none') * mask).mean()
+                s_loss += (F.cross_entropy(s_logits_us, hard_pseudo_label, reduction='none') * mask).mean()
             # s_loss = s_loss_simi2 + s_loss
             ######################################################################################
 
@@ -533,39 +530,41 @@ def train_loop(args, labeled_loader, unlabeled_loader, dev_loader,test_loader,
                 test_model = avg_student_model if avg_student_model is not None else student_model
 
                 # test_loss, top1, top5 = evaluate(args, dev_loader, test_model, criterion)
-
-                test_loss, top1 = evaluate(args, dev_loader, test_model, criterion)
+                if step >= 1000:
+                    test_loss, top1 = evaluate(args, dev_loader, test_model, criterion)
                 # report, confusion,mif1,maf1 = inference_fn(args,test_model,dev_loader)
                 # print(mif1,maf1)
-                args.writer.add_scalar("test/loss", test_loss, args.num_eval)
-                args.writer.add_scalar("test/acc@1", top1, args.num_eval)
+                    args.writer.add_scalar("test/loss", test_loss, args.num_eval)
+                    args.writer.add_scalar("test/acc@1", top1, args.num_eval)
                 # args.writer.add_scalar("test/acc@5", top5, args.num_eval)
                 # wandb.log({"test/loss": test_loss,
                 #            "test/acc@1": top1,
                 #            "test/acc@5": top5})
 
-                is_best = top1 > args.best_top1
-                if is_best:
-                    args.best_top1 = top1
-                    # args.best_top5 = top5
+                    is_best = top1 > args.best_top1
+                    if is_best:
+                        args.best_top1 = top1
 
-                logger.info(f"top-1 acc: {top1:.2f}")
-                logger.info(f"Best top-1 acc: {args.best_top1:.2f}")
 
-                save_checkpoint(args, {
-                    'step': step + 1,
-                    'teacher_state_dict': teacher_model.state_dict(),
-                    'student_state_dict': student_model.state_dict(),
-                    'avg_state_dict': avg_student_model.state_dict() if avg_student_model is not None else None,
-                    'best_top1': args.best_top1,
-                    # 'best_top5': args.best_top5,
-                    'teacher_optimizer': t_optimizer.state_dict(),
-                    'student_optimizer': s_optimizer.state_dict(),
-                    'teacher_scheduler': t_scheduler.state_dict(),
-                    'student_scheduler': s_scheduler.state_dict(),
-                    'teacher_scaler': t_scaler.state_dict(),
-                    'student_scaler': s_scaler.state_dict(),
-                }, is_best)
+
+
+                    logger.info(f"top-1 acc: {top1:.2f}")
+                    logger.info(f"Best top-1 acc: {args.best_top1:.2f}")
+
+                    save_checkpoint(args, {
+                        'step': step + 1,
+                        'teacher_state_dict': teacher_model.state_dict(),
+                        'student_state_dict': student_model.state_dict(),
+                        'avg_state_dict': avg_student_model.state_dict() if avg_student_model is not None else None,
+                        'best_top1': args.best_top1,
+                        # 'best_top5': args.best_top5,
+                        'teacher_optimizer': t_optimizer.state_dict(),
+                        'student_optimizer': s_optimizer.state_dict(),
+                        'teacher_scheduler': t_scheduler.state_dict(),
+                        'student_scheduler': s_scheduler.state_dict(),
+                        'teacher_scaler': t_scaler.state_dict(),
+                        'student_scaler': s_scaler.state_dict(),
+                    }, is_best)
             if args.dataset == "kg":
                 report, confusion, mif1, maf1, predict_all=inference_fn(args,student_model, labeled_loader)
                 print(report,mif1)
@@ -780,51 +779,49 @@ def main():
     args.best_top5 = 0.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
-    if args.num_labeled == 100:
-        args.teacher_lr = 0.0001
-        args.student_lr = 0.0001
-    if args.dataset == "AGNews":
-        args.temperature = 0.5
-        args.drop = 0.7
-        if args.num_labeled == 10000 or args.num_labeled == 1000:
-            args.teacher_lr = 0.0005
-            args.student_lr = 0.0005
-    if args.dataset == "Yelp":
-        args.batch_size = 4
-        args.max_len = 256
-        args.num_classes = 5
-
-        args.temperature = 0.1
-        if args.num_labeled == 100:
-            args.total_steps = 2000
-            args.teacher_lr = 0.0001
-            args.student_lr = 0.0001
-        elif args.num_labeled == 1000:
-            args.total_steps = 15000
-            args.teacher_lr = 0.0005
-            args.student_lr = 0.0005
-        elif args.num_labeled == 10000:
-            args.total_steps = 40000
-            args.teacher_lr = 0.0005
-            args.student_lr = 0.0005
-    if args.dataset == "Yahoo":
-        args.batch_size = 4
-        args.max_len = 256
-        args.num_classes = 10
-        args.num_unlabeled = 40000
-
-        if args.num_labeled == 100:
-            args.teacher_lr = 0.00003
-            args.student_lr = 0.00003
-            args.total_steps = 15000
-        elif args.num_labeled == 1000:
-            args.teacher_lr = 0.00007
-            args.student_lr = 0.00007
-            args.total_steps = 40000
-        elif args.num_labeled == 10000:
-            args.teacher_lr = 0.0001
-            args.student_lr = 0.0001
-            args.total_steps = 40000
+    # if args.num_labeled == 100:
+    #     args.teacher_lr = 0.0001
+    #     args.student_lr = 0.0001
+    # if args.dataset == "AGNews":
+    #     args.temperature = 0.5
+    #     args.drop = 0.7
+    #     if args.num_labeled == 10000 or args.num_labeled == 1000:
+    #         args.teacher_lr = 0.0005
+    #         args.student_lr = 0.0005
+    # if args.dataset == "Yelp":
+    #     args.max_len = 256
+    #     args.num_classes = 5
+    #
+    #     args.temperature = 0.1
+    #     if args.num_labeled == 100:
+    #         args.teacher_lr = 0.0001
+    #         args.student_lr = 0.0001
+    #     elif args.num_labeled == 1000:
+    #         args.total_steps = 15000
+    #         args.teacher_lr = 0.0005
+    #         args.student_lr = 0.0005
+    #     elif args.num_labeled == 10000:
+    #         args.total_steps = 40000
+    #         args.teacher_lr = 0.0005
+    #         args.student_lr = 0.0005
+    # if args.dataset == "Yahoo":
+    #     args.batch_size = 4
+    #     args.max_len = 256
+    #     args.num_classes = 10
+    #     args.num_unlabeled = 40000
+    #
+    #     if args.num_labeled == 100:
+    #         args.teacher_lr = 0.00003
+    #         args.student_lr = 0.00003
+    #         args.total_steps = 15000
+    #     elif args.num_labeled == 1000:
+    #         args.teacher_lr = 0.00007
+    #         args.student_lr = 0.00007
+    #         args.total_steps = 40000
+    #     elif args.num_labeled == 10000:
+    #         args.teacher_lr = 0.0001
+    #         args.student_lr = 0.0001
+    #         args.total_steps = 40000
 
 
 
@@ -871,29 +868,39 @@ def main():
             torch.distributed.barrier()
 
         train_sampler = RandomSampler if args.local_rank == -1 else DistributedSampler
-        labeled_loader = DataLoader(
-            labeled_dataset,
-            sampler=train_sampler(labeled_dataset),
-            batch_size=args.batch_size,
-            num_workers=args.workers,
-            drop_last=True)
+        if args.noise_rate:
+                noise_loader = DataLoader(
+                    labeled_dataset,
+                    sampler=train_sampler(labeled_dataset),
+                    batch_size=args.label_batch_size,
+                    num_workers=args.workers,
+                    drop_last=True)
 
-        unlabeled_loader = DataLoader(
-            unlabeled_dataset,
-            sampler=train_sampler(unlabeled_dataset),
-            batch_size=args.batch_size,
-            num_workers=args.workers,
-            drop_last=True)
+        else:
+            labeled_loader = DataLoader(
+                labeled_dataset,
+                sampler=train_sampler(labeled_dataset),
+                batch_size=args.label_batch_size,
+                num_workers=args.workers,
+                drop_last=True)
+
+            unlabeled_loader = DataLoader(
+                unlabeled_dataset,
+                sampler=train_sampler(unlabeled_dataset),
+                batch_size=args.unlabel_batch_size,
+                num_workers=args.workers,
+                drop_last=True)
+
 
         dev_loader = DataLoader(dev_dataset,
                                  sampler=SequentialSampler(dev_dataset),
-                                 batch_size=args.batch_size,
+                                 batch_size=128,
                                  num_workers=args.workers)
     else:
         test_dataset = DATASET_GETTERS[args.dataset](args)
     test_loader = DataLoader(test_dataset,
                              sampler=SequentialSampler(test_dataset),
-                             batch_size=args.batch_size,
+                             batch_size=128,
                              num_workers=args.workers)
 
 
@@ -1041,7 +1048,7 @@ def main():
     teacher_model.zero_grad()
     student_model.zero_grad()
     if args.pretrain == True:
-        index_num = int(len(labeled_dataset) / args.batch_size)
+        index_num = int(len(labeled_dataset) / args.label_batch_size)
         X = torch.zeros((len(labeled_dataset), args.num_classes))
         # for epoch in range(10):
         #     for i, (input, target) in enumerate(labeled_loader):
@@ -1089,7 +1096,90 @@ def main():
     else:
         T_feature = torch.zeros(768, args.num_classes).to(args.device)
 
+    if args.noise_rate and args.NTM:
+        best_f1 = 0.0
+        for epoch in range(100):
+            for i, (text_noise,label_noise, text_clean, label_clean) in enumerate(noise_loader):
+                student_model.train()
+                text_noise = text_noise.to(args.device)
+                label_noise = label_noise.to(args.device)
+                text_clean = text_clean.to(args.device)
+                label_clean = label_clean.to(args.device)
+                T_NTM = to_var(torch.eye(args.num_classes, args.num_classes))
+                meta_net = create_model(args, meta=True)
 
+                def copyStateDict(state_dict):
+                    new_state_dict = OrderedDict()
+                    for k, v in state_dict.items():
+                        if "ids" not in k:
+                            new_state_dict[k] = v
+                    return new_state_dict
+
+                # 加载pretrain model
+                state_dict = student_model.module.state_dict()
+                new_dict = copyStateDict(state_dict)
+                meta_net.load_state_dict(new_dict)
+                meta_net.to(args.device)
+
+                meta_us_logits, _ = meta_net(text_noise)
+                meta_y_hat = torch.softmax(meta_us_logits, dim=-1)
+                loss_meta = criterion(torch.mm(meta_y_hat, T_NTM), label_noise)  # (pre, hard_pseudo_label)
+
+                meta_net.meta_zero_grad()
+
+                grads = torch.autograd.grad(loss_meta, (meta_net.params()), create_graph=True, allow_unused=True)
+                meta_net.update_params(1e-3, source_params=grads)
+
+                meta_l_logits, _ = meta_net(text_clean)
+                l_pre = torch.softmax(meta_l_logits, dim=-1)
+                l_g_meta = criterion(l_pre, label_clean)
+                grads = torch.autograd.grad(l_g_meta, T_NTM, retain_graph=True)[0]
+                grads = grads / torch.max(grads)
+                T_NTM = torch.clamp(T_NTM - 0.11 * grads, min=0)
+                # T_NTM = F.softmax(T_NTM)
+                norm_c = torch.sum(T_NTM, 1)
+                for j in range(args.num_classes):
+                    if norm_c[j] != 0:
+                        T_NTM[j, :] /= norm_c[j]
+
+                s_logits_l, clean_features = student_model(text_clean)
+                s_loss = criterion(s_logits_l, label_clean)
+                s_logits_us, s_feature_us = student_model(text_noise)
+                s_loss += criterion(torch.mm(s_logits_us, T_NTM), label_noise)
+                s_optimizer.zero_grad()
+
+                s_loss.backward()
+                s_optimizer.step()
+            if epoch > 50:
+                report, confusion, mif1, maf1, _ = inference_fn(args, student_model, test_loader)
+                best_f1 = mif1 if mif1 > best_f1 else best_f1
+                print(epoch, mif1, maf1, s_loss, f"best{best_f1}")
+
+    elif args.noise_rate:
+        best_f1 =0.0
+        for epoch in range(100):
+            for text_noise,label_noise, text_clean, label_clean in noise_loader:
+                student_model.train()
+                s_optimizer.zero_grad()
+                text_noise = text_noise.to(args.device)
+                label_noise = label_noise.to(args.device)
+                text_clean = text_clean.to(args.device)
+                label_clean = label_clean.to(args.device)
+
+                s_logits_l, clean_features = student_model(text_clean)
+                s_loss = criterion(s_logits_l, label_clean)
+                #
+                s_logits_us, s_feature_us = student_model(text_noise)
+                s_loss += criterion(s_logits_us, label_noise)
+                s_loss.backward()
+                s_optimizer.step()
+            # if epoch > 50:
+            #     report, confusion, mif1, maf1, _ = inference_fn(args, student_model, test_loader)
+            #     best_f1 = mif1 if mif1 > best_f1 else best_f1
+            #     print(epoch,mif1, maf1, s_loss,f"best{best_f1}")
+    report, confusion, mif1, maf1, _ = inference_fn(args, student_model, test_loader)
+    print("@@@@@@@@@@@@@@@@1", report, confusion, mif1, maf1)
+    return
 
     # if args.pretrain == False:
     #     T_NTM = torch.zeros(args.num_classes,args.num_classes).to(args.device)
