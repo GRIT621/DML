@@ -8,7 +8,7 @@ CUDA_VISIBLE_DEVICES="1"
 
 # from timeout_decorator import timeout
 # Define your API key
-api_key = "sk-GZdJZKgMlIoyW7qx387435C67b554e87Ab86988d15Ae84Fa"
+api_key = ""
 
 # Define your proxy API
 proxy_api_url = "https://api.bbai1.com/v1/chat/completions"
@@ -21,17 +21,20 @@ headers = {
 
 def timeout_handler(signum, frame):
     raise TimeoutError("Code execution timed out")
+# amazon_prompt = "Classify the follow topic into Society & Culture(1), Science & Mathematics(2), Health(3), Education & Reference(4)," \
+#          " Computers & Internet(5), Sports(6), Business & Finance(7), Entertainment & Music(8), Family & Relationships(9)," \
+#          "and Politics & Government(10). Note only return the number and no other words:"
 
-prompt = "Classify the follow review into star 1-5 different sentiment levels from negative to positive, only return the number:"
+yelp_prompt = "Classify the follow review into star 1-5 different sentiment levels from negative to positive, only return the number:"
 # # yelp = pd.read_csv('/home/lsj0920/MPL/dataset/Yelp/yelp_review_full_csv/test.csv', names=['label','text'])
-yelp = pd.read_csv('/home/lsj0920/MPL/dataset/Yelp/yelp_review_full_csv/test.csv', names=['label','text'])
-test_yelp = yelp[3000:5000]
+yelp = pd.read_csv('./dataset/Yelp/yelp_review_full_csv/test.csv', names=['label','text'])
+test_yelp = yelp.sample(15000)
 # # print(test_yelp['text'][292][:10])
 #
 #
 
-for i in range(3000,len(test_yelp)+3000):
-    new_prompt = prompt +test_yelp['text'][i]
+for i in range(len(test_yelp)):
+    new_prompt = yelp_prompt +test_yelp['text'][i]
     data = {
     'model': 'gpt-3.5-turbo',  # Specify the model here
     'messages': [{
@@ -57,7 +60,7 @@ for i in range(3000,len(test_yelp)+3000):
         print(a)
         if a != -1 or count <= 0 :
             break
-    with open("test3000-5000.txt", "a+") as file:
+    with open("yelp.txt", "a+") as file:
         file.write(str(a) + ",," + "text:" + test_yelp['text'][i][:10] + '\n')
         file.close()
 
