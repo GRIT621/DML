@@ -18,32 +18,12 @@ from .meta_base import MetaModule,MetaLinear
 from .MetaBert import MetaBertModel
 import warnings
 
-
-max_len = 32
-seed = 666
-batch_size = 16
-learning_rate = 2e-6
-weight_decay = 1e-5
-epochs = 50
-EARLY_STOP = True
-EARLY_STOPPING_STEPS = 5
-
-def to_var(x, requires_grad=True):
-    if torch.cuda.is_available():
-        x = x.cuda()
-    return Variable(x, requires_grad=requires_grad)
-
-
 class Model(nn.Module):
     def __init__(self,args):
         super().__init__()
-        self.encoder = BertModel.from_pretrained('bert-base-cased')
 
+        self.encoder = BertModel.from_pretrained('bert-base-uncased')
         self.embedding_size = self.encoder.pooler.dense.out_features #bert-base
-#         self.embedding_size = encoder.pooler.out_features #albert
-#         if args.NTM_require == True:
-#         self.NTM = nn.Linear(args.num_classes, args.num_classes)
-        #self.register_buffer('NTM', to_var(torch.eye(args.num_classes, args.num_classes), requires_grad=True))
         self.fc = nn.Linear(self.embedding_size, args.num_classes)
         self.dropout = nn.Dropout(args.drop)
 
@@ -51,46 +31,27 @@ class Model(nn.Module):
     def forward(self, x, NTM_required=False):
 
         x = self.encoder(input_ids=x[:, 0, :], attention_mask=x[:,1, :])[0]
-        #print(x.size())
-#         x = self.gru(x)
-
         x_feature = x.mean(1)
         x_feature = self.dropout(x_feature)
-        # x = attention_module(x)
         x_class = self.fc(x_feature)
-        # if NTM_required:
-        #     # with torch.no_grad():
-        #     x_class = torch.mm(x_class,self.NTM)
 
         return x_class,x_feature
 
 class MetaModel(MetaModule):
     def __init__(self,args):
         super().__init__()
-        self.encoder = MetaBertModel.from_pretrained('bert-base-cased')
 
+        self.encoder = MetaBertModel.from_pretrained('bert-base-uncased')
         self.embedding_size = self.encoder.pooler.dense.weight.shape[0] #bert-base
-#         self.embedding_size = encoder.pooler.out_features #albert
-#         if args.NTM_require == True:
-#         self.NTM = nn.Linear(args.num_classes, args.num_classes)
-#         self.register_buffer('NTM', to_var(torch.eye(args.num_classes, args.num_classes), requires_grad=True))
         self.fc = MetaLinear(self.embedding_size, args.num_classes)
         self.dropout = nn.Dropout(args.drop)
 
-#         self.sig = nn.Sigmoid()
     def forward(self, x, NTM_required=False):
 
         x = self.encoder(input_ids=x[:, 0, :], attention_mask=x[:,1, :])[0]
-        #print(x.size())
-#         x = self.gru(x)
-
         x_feature = x.mean(1)
         x_feature = self.dropout(x_feature)
-        # x = attention_module(x)
         x_class = self.fc(x_feature)
-        # if NTM_required:
-        #     # with torch.no_grad():
-        #     x_class = torch.mm(x_class,self.NTM)
 
         return x_class,x_feature
 
